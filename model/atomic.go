@@ -435,7 +435,8 @@ func (mod *Model) DeleteWhere(param QueryParam) (int, error) {
 		for _, col := range mod.UniqueColumns {
 			typ := strings.ToLower(col.Type)
 			if typ == "string" {
-				data[col.Name] = dbal.Raw(fmt.Sprintf("CONCAT_WS('_', '%d')", time.Now().UnixNano()))
+				//先去掉把字段设置为当前时间
+				//data[col.Name] = dbal.Raw(fmt.Sprintf("CONCAT_WS('_', '%d')", time.Now().UnixNano()))
 				columns = append(
 					columns,
 					fmt.Sprintf("CONCAT('\"%s\":\"', `%s`, '\"')", col.Name, col.Name),
