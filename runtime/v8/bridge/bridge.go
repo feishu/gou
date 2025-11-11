@@ -584,3 +584,25 @@ func (promise PromiseT) String() string {
 func (undefined UndefinedT) String() string {
 	return "undefined"
 }
+
+// ----- 新增 Getter -----
+
+// Context returns the underlying v8go.Context
+func (f *FunctionT) Context() *v8go.Context {
+	return f.ctx
+}
+
+// Value returns the underlying v8go.Value
+func (f *FunctionT) Value() *v8go.Value {
+	return f.value
+}
+
+// Context returns the underlying v8go.Context
+func (p *PromiseT) Context() *v8go.Context {
+	return p.ctx
+}
+
+// Value returns the underlying v8go.Value
+func (p *PromiseT) Value() *v8go.Value {
+	return p.value
+}
