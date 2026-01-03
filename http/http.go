@@ -458,7 +458,7 @@ func (r *Request) json() bool {
 
 // xml check if the content-type is application/xml
 func (r *Request) xml() bool {
-	return strings.HasPrefix(r.headers.Get("Content-Type"), "application/xml")
+	return strings.HasPrefix(r.headers.Get("Content-Type"), "application/xml") || strings.HasPrefix(r.headers.Get("Content-Type"), "text/xml")
 }
 
 // urlencoded check if the content-type is application/x-www-form-urlencoded
