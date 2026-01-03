@@ -23,17 +23,9 @@ import (
 func GetTestConfigs() map[string]*Config {
 	vectorStore := qdrant.NewStore()
 
-	// Create graph store with proper configuration and connect
+	// Create graph store with proper configuration
 	graphStoreConfig := getGraphStore("test")
 	graphStore := neo4j.NewStoreWithConfig(graphStoreConfig)
-
-	// Auto-connect graph store
-	ctx := context.Background()
-	if err := graphStore.Connect(ctx); err != nil {
-		// Log warning but don't fail - tests will skip if not connected
-		logger := log.StandardLogger()
-		logger.Warnf("Failed to connect graph store: %v", err)
-	}
 
 	logger := log.StandardLogger()
 	testStore := getRedisStore("store_redis", 6)

@@ -532,30 +532,30 @@ func (c *VectorStoreConfig) Validate() error {
 // CreateCollectionOptions represents configuration for creating a collection
 type CreateCollectionOptions struct {
 	// Collection Basic Configuration
-	CollectionName string         `json:"collection_name" yaml:"collection_name"` // Collection/Table name
-	Dimension      int            `json:"dimension" yaml:"dimension"`             // Vector dimension (e.g., 1536 for OpenAI embeddings)
-	Distance       DistanceMetric `json:"distance" yaml:"distance"`               // Distance metric
-	IndexType      IndexType      `json:"index_type" yaml:"index_type"`           // Index type
+	CollectionName string         `json:"collection_name"` // Collection/Table name
+	Dimension      int            `json:"dimension"`       // Vector dimension (e.g., 1536 for OpenAI embeddings)
+	Distance       DistanceMetric `json:"distance"`        // Distance metric
+	IndexType      IndexType      `json:"index_type"`      // Index type
 
 	// Index Parameters (for HNSW)
-	M              int `json:"m,omitempty" yaml:"m,omitempty"`                             // Number of bidirectional links for each node (HNSW)
-	EfConstruction int `json:"ef_construction,omitempty" yaml:"ef_construction,omitempty"` // Size of dynamic candidate list (HNSW)
-	EfSearch       int `json:"ef_search,omitempty" yaml:"ef_search,omitempty"`             // Size of dynamic candidate list for search (HNSW)
+	M              int `json:"m,omitempty"`               // Number of bidirectional links for each node (HNSW)
+	EfConstruction int `json:"ef_construction,omitempty"` // Size of dynamic candidate list (HNSW)
+	EfSearch       int `json:"ef_search,omitempty"`       // Size of dynamic candidate list for search (HNSW)
 
 	// Index Parameters (for IVF)
-	NumLists  int `json:"num_lists,omitempty" yaml:"num_lists,omitempty"`   // Number of clusters (IVF)
-	NumProbes int `json:"num_probes,omitempty" yaml:"num_probes,omitempty"` // Number of clusters to search (IVF)
+	NumLists  int `json:"num_lists,omitempty"`  // Number of clusters (IVF)
+	NumProbes int `json:"num_probes,omitempty"` // Number of clusters to search (IVF)
 
 	// Sparse Vector Configuration (for hybrid search)
-	EnableSparseVectors bool   `json:"enable_sparse_vectors,omitempty" yaml:"enable_sparse_vectors,omitempty"` // Enable sparse vector support for hybrid retrieval
-	DenseVectorName     string `json:"dense_vector_name,omitempty" yaml:"dense_vector_name,omitempty"`         // Named vector for dense vectors (default: "dense")
-	SparseVectorName    string `json:"sparse_vector_name,omitempty" yaml:"sparse_vector_name,omitempty"`       // Named vector for sparse vectors (default: "sparse")
+	EnableSparseVectors bool   `json:"enable_sparse_vectors,omitempty"` // Enable sparse vector support for hybrid retrieval
+	DenseVectorName     string `json:"dense_vector_name,omitempty"`     // Named vector for dense vectors (default: "dense")
+	SparseVectorName    string `json:"sparse_vector_name,omitempty"`    // Named vector for sparse vectors (default: "sparse")
 
 	// Storage Configuration
-	PersistPath string `json:"persist_path,omitempty" yaml:"persist_path,omitempty"` // Path for persistent storage
+	PersistPath string `json:"persist_path,omitempty"` // Path for persistent storage
 
 	// Collection-specific settings
-	ExtraParams map[string]interface{} `json:"extra_params,omitempty" yaml:"extra_params,omitempty"` // Collection-specific parameters
+	ExtraParams map[string]interface{} `json:"extra_params,omitempty"` // Collection-specific parameters
 }
 
 // Validate validates the collection creation configuration
@@ -2083,76 +2083,6 @@ type QueryOptions struct {
 
 	// Searcher is the searcher to use for searching documents (Optional)
 	Searcher Searcher
-}
-
-// VectorSearchOptions represents options for pure vector search (without graph enrichment)
-// Used for application-side orchestration where vector and graph searches are composed separately
-type VectorSearchOptions struct {
-	CollectionID string    `json:"collection_id"`         // Collection ID (required)
-	DocumentID   string    `json:"document_id,omitempty"` // Optional document ID filter
-	Query        string    `json:"query"`                 // Query text (required if QueryVector is empty)
-	QueryVector  []float64 // Pre-computed query vector (optional, if provided, Query is ignored)
-
-	// Search parameters
-	K        int                    `json:"k,omitempty"`         // Number of results to return (default: 10)
-	Filter   map[string]interface{} `json:"filter,omitempty"`    // Metadata filter
-	MinScore float64                `json:"min_score,omitempty"` // Minimum similarity score
-
-	// Embedding (required if QueryVector is not provided)
-	Embedding         Embedding
-	EmbeddingProgress EmbeddingProgress
-
-	// Optional reranking
-	Reranker Reranker
-}
-
-// GraphSearchOptions represents options for pure graph search (knowledge graph traversal/query)
-// Used for application-side orchestration where vector and graph searches are composed separately
-type GraphSearchOptions struct {
-	CollectionID string `json:"collection_id"`         // Collection ID (required)
-	DocumentID   string `json:"document_id,omitempty"` // Optional document ID filter
-
-	// Query options - one of the following is required
-	Query      string                 `json:"query,omitempty"`      // Natural language query (requires Extraction for entity extraction)
-	Entities   []string               `json:"entities,omitempty"`   // Explicit entity names to search
-	EntityIDs  []string               `json:"entity_ids,omitempty"` // Explicit entity IDs to search
-	Cypher     string                 `json:"cypher,omitempty"`     // Custom Cypher query
-	Parameters map[string]interface{} `json:"parameters,omitempty"` // Parameters for Cypher query
-
-	// Traversal options
-	MaxDepth      int      `json:"max_depth,omitempty"`      // Maximum traversal depth (default: 2)
-	RelationTypes []string `json:"relation_types,omitempty"` // Filter by relationship types
-	EntityTypes   []string `json:"entity_types,omitempty"`   // Filter by entity types
-	Limit         int      `json:"limit,omitempty"`          // Maximum number of results
-
-	// Entity extraction (required if Query is provided and Entities/EntityIDs are empty)
-	Extraction         Extraction
-	ExtractionProgress ExtractionProgress
-
-	// Embedding for entity matching (optional, used when matching entities by semantic similarity)
-	Embedding         Embedding
-	EmbeddingProgress EmbeddingProgress
-}
-
-// VectorSearchResult represents the result of a pure vector search
-type VectorSearchResult struct {
-	Segments []Segment `json:"segments"` // Matched segments
-	Total    int       `json:"total"`    // Total number of matches (if available)
-}
-
-// GraphSearchResult represents the result of a pure graph search
-type GraphSearchResult struct {
-	Nodes         []GraphNode         `json:"nodes"`         // Matched nodes/entities
-	Relationships []GraphRelationship `json:"relationships"` // Related relationships
-	Paths         []GraphPath         `json:"paths"`         // Matched paths (if path query)
-	Segments      []Segment           `json:"segments"`      // Related segments (if segment IDs are found in nodes)
-}
-
-// GraphPath represents a path in the graph
-type GraphPath struct {
-	Nodes         []GraphNode         `json:"nodes"`         // Nodes in the path
-	Relationships []GraphRelationship `json:"relationships"` // Relationships in the path
-	Length        int                 `json:"length"`        // Path length
 }
 
 // UpdateWeightOptions represents the options for updating weight

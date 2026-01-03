@@ -94,68 +94,6 @@ func MakeScript(source []byte, file string, timeout time.Duration, isroot ...boo
 	return script, nil
 }
 
-// MakeScriptInMemory creates a script from source code without file system access.
-// This is useful for scripts stored in database or generated dynamically.
-// Supports TypeScript syntax but NOT imports (since there's no file to resolve).
-// For scripts with imports, use MakeScript with a real file path.
-func MakeScriptInMemory(source []byte, virtualFile string, timeout time.Duration, isroot ...bool) (*Script, error) {
-	syncLock.Lock()
-	defer syncLock.Unlock()
-
-	var jsCode []byte
-
-	// Transform TypeScript to JavaScript if needed
-	if strings.HasSuffix(virtualFile, ".ts") {
-		// Remove export statements and transform TS to JS
-		tsCode := removeExports(string(source))
-
-		result := api.Transform(tsCode, api.TransformOptions{
-			Loader:     api.LoaderTS,
-			Target:     api.ESNext,
-			Sourcefile: virtualFile,
-		})
-
-		if len(result.Errors) > 0 {
-			errors := []string{}
-			for _, e := range result.Errors {
-				errors = append(errors, e.Text)
-			}
-			return nil, fmt.Errorf("transform error: %s\n%s", strings.Join(errors, "\n"), string(source))
-		}
-		jsCode = result.Code
-	} else {
-		// For .js files, just remove export statements
-		jsCode = []byte(removeExports(string(source)))
-	}
-
-	script := NewScript(virtualFile, virtualFile, timeout)
-	script.Source = string(jsCode)
-	script.Root = false
-	if len(isroot) > 0 {
-		script.Root = isroot[0]
-	}
-
-	return script, nil
-}
-
-// removeExports removes export keywords from source code
-// Handles: export function, export class, export const, export var, export let, export default
-func removeExports(source string) string {
-	// Handle "export default function/class" -> "function/class"
-	source = regexp.MustCompile(`export\s+default\s+(function|class)\s+`).ReplaceAllString(source, "$1 ")
-
-	// Handle "export default" alone (for expressions) -> remove the line or make it a variable
-	// For simplicity, just remove "export default " for non-function/class cases
-	source = regexp.MustCompile(`export\s+default\s+`).ReplaceAllString(source, "")
-
-	// Handle "export function/class/const/var/let" -> "function/class/const/var/let"
-	source = exportRe.ReplaceAllStringFunc(source, func(m string) string {
-		return strings.ReplaceAll(m, "export ", "")
-	})
-
-	return source
-}
-
 // Exists check if the script exists
 func Exists(id string) bool {
 	if strings.HasPrefix(id, "scripts.") {
@@ -561,112 +499,6 @@ func SelectRoot(id string) (*Script, error) {
 	return script, nil
 }
 
-// Call call the function directly
-func Call(options CallOptions, source string, args ...interface{}) (interface{}, error) {
-	timeout := options.Timeout
-	if timeout == 0 {
-		timeout = time.Duration(runtimeOption.ContextTimeout) * time.Millisecond
-	}
-
-	name := extractFunctionName(source)
-	source = reFuncHead.ReplaceAllString(source, "($2) => {")
-	var instance *v8go.UnboundScript
-
-	// The performance mode
-	var ctx *v8go.Context
-	var err error
-	defer func() {
-		if ctx != nil {
-			ctx.Close()
-			ctx = nil
-		}
-	}()
-
-	if runtimeOption.Mode == "performance" {
-
-		runner, err := dispatcher.Select(time.Duration(runtimeOption.DefaultTimeout) * time.Millisecond)
-		if err != nil {
-			return nil, err
-		}
-
-		runner.global = options.Global
-		runner.sid = options.Sid
-		ctx, err = runner.Context()
-		if err != nil {
-			return nil, err
-		}
-
-		instance, err = ctx.Isolate().CompileUnboundScript(source, name, v8go.CompileOptions{})
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	iso, err := SelectIsoStandard(time.Duration(runtimeOption.DefaultTimeout) * time.Millisecond)
-	if err != nil {
-		return nil, err
-	}
-	defer iso.Dispose() // Always dispose isolate to prevent memory leak
-
-	ctx = v8go.NewContext(iso, iso.Template)
-	defer ctx.Close() // Always close context to prevent memory leak
-
-	instance, err = iso.CompileUnboundScript(source, name, v8go.CompileOptions{})
-	if err != nil {
-		return nil, err
-	}
-
-	fn, err := instance.Run(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer fn.Release()
-
-	global := ctx.Global()
-	global.Set(name, fn)
-	defer global.Delete(name)
-
-	// Set the global data
-	err = bridge.SetShareData(ctx, global, &bridge.Share{
-		Sid:    options.Sid,
-		Root:   false,
-		Global: options.Global,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// console.log("foo", "bar", 1, 2, 3, 4)
-	err = console.New(runtimeOption.ConsoleMode).Set("console", ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Run the method
-	jsArgs, err := bridge.JsValues(ctx, args)
-	if err != nil {
-		return nil, err
-	}
-	defer bridge.FreeJsValues(jsArgs)
-
-	jsRes, err := global.MethodCall(name, bridge.Valuers(jsArgs)...)
-	if err != nil {
-		if e, ok := err.(*v8go.JSError); ok {
-			PrintException(name, args, e, nil)
-		}
-		log.Error("%s %s", name, err.Error())
-		return nil, err
-	}
-	defer bridge.FreeJsValue(jsRes)
-
-	goRes, err := bridge.GoValue(jsRes, ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	return goRes, nil
-}
-
 // NewContext create a new context
 func (script *Script) NewContext(sid string, global map[string]interface{}) (*Context, error) {
 
@@ -696,7 +528,6 @@ func (script *Script) NewContext(sid string, global map[string]interface{}) (*Co
 			Data:        global,
 			Root:        script.Root,
 			Timeout:     timeout,
-			script:      script,
 			Runner:      runner,
 			Context:     ctx,
 			SourceRoots: script.SourceRoots,
@@ -765,110 +596,28 @@ func (script *Script) execPerformance(process *process.Process) interface{} {
 	runner.args = process.Args
 	runner.global = process.Global
 	runner.sid = process.Sid
-	if process.Authorized != nil {
-		runner.authorized = process.Authorized.AuthorizedToMap()
-	}
 	return runner.Exec(script)
 }
 
 // execStandard execute the script in standard mode
 func (script *Script) execStandard(process *process.Process) interface{} {
-	// Check if there's a shared V8 context from parent call
-	if process.V8Context != nil {
-		if v8ctx, ok := process.V8Context.(*v8go.Context); ok {
-			// Use shared context, no resource cleanup
-			return script.execStandardWithSharedContext(v8ctx, process)
-		}
-	}
 
-	// No shared context, create new isolate and context with full resource management
-	return script.execStandardStandalone(process)
-}
-
-// execStandardWithSharedContext execute script with shared V8 context (no resource cleanup)
-func (script *Script) execStandardWithSharedContext(ctx *v8go.Context, process *process.Process) interface{} {
-
-	// Create instance of the script
-	instance, err := ctx.Isolate().CompileUnboundScript(script.Source, script.File, v8go.CompileOptions{})
-	if err != nil {
-		exception.New("scripts.%s.%s %s", 500, script.ID, process.Method, err.Error()).Throw()
-		return nil
-	}
-	v, err := instance.Run(ctx)
-	if err != nil {
-		return err
-	}
-	defer v.Release()
-
-	// Set the global data
-	global := ctx.Global()
-	share := &bridge.Share{
-		Sid:    process.Sid,
-		Root:   script.Root,
-		Global: process.Global,
-	}
-	if process.Authorized != nil {
-		share.Authorized = process.Authorized.AuthorizedToMap()
-	}
-
-	err = bridge.SetShareData(ctx, global, share)
-	if err != nil {
-		log.Error("scripts.%s.%s %s", script.ID, process.Method, err.Error())
-		exception.New("scripts.%s.%s %s", 500, script.ID, process.Method, err.Error()).Throw()
-		return nil
-	}
-
-	// console.log("foo", "bar", 1, 2, 3, 4)
-	err = console.New(runtimeOption.ConsoleMode).Set("console", ctx)
-	if err != nil {
-		exception.New("scripts.%s.%s %s", 500, script.ID, process.Method, err.Error()).Throw()
-		return nil
-	}
-
-	// Run the method
-	jsArgs, err := bridge.JsValues(ctx, process.Args)
-	if err != nil {
-		log.Error("scripts.%s.%s %s", script.ID, process.Method, err.Error())
-		exception.New(err.Error(), 500).Throw()
-		return nil
-	}
-	defer bridge.FreeJsValues(jsArgs)
-
-	jsRes, err := global.MethodCall(process.Method, bridge.Valuers(jsArgs)...)
-	if err != nil {
-		// Debug output the error stack
-		if e, ok := err.(*v8go.JSError); ok {
-			PrintException(process.Method, process.Args, e, script.SourceRoots)
-		}
-
-		log.Error("scripts.%s.%s %s", script.ID, process.Method, err.Error())
-		exception.Err(err, 500).Throw()
-		return nil
-	}
-	defer bridge.FreeJsValue(jsRes)
-
-	goRes, err := bridge.GoValue(jsRes, ctx)
-	if err != nil {
-		log.Error("scripts.%s.%s %s", script.ID, process.Method, err.Error())
-		exception.New(err.Error(), 500).Throw()
-		return nil
-	}
-
-	return goRes
-}
-
-// execStandardStandalone execute script as standalone (creates and cleans up own isolate)
-func (script *Script) execStandardStandalone(process *process.Process) interface{} {
 	iso, err := SelectIsoStandard(time.Duration(runtimeOption.DefaultTimeout) * time.Millisecond)
 	if err != nil {
 		exception.New("scripts.%s.%s %s", 500, script.ID, process.Method, err.Error()).Throw()
 		return nil
 	}
-
 	defer iso.Dispose()
 
 	ctx := v8go.NewContext(iso, iso.Template)
 	defer ctx.Close()
+
+	// Next Version will support this, snapshot will be used in the next version
+	// ctx, err := iso.Context()
+	// if err != nil {
+	// 	exception.New("scripts.%s.%s %s", 500, script.ID, process.Method, err.Error()).Throw()
+	// 	return nil
+	// }
 
 	// Create instance of the script
 	instance, err := iso.CompileUnboundScript(script.Source, script.File, v8go.CompileOptions{})
@@ -884,16 +633,11 @@ func (script *Script) execStandardStandalone(process *process.Process) interface
 
 	// Set the global data
 	global := ctx.Global()
-	share := &bridge.Share{
+	err = bridge.SetShareData(ctx, global, &bridge.Share{
 		Sid:    process.Sid,
 		Root:   script.Root,
 		Global: process.Global,
-	}
-	if process.Authorized != nil {
-		share.Authorized = process.Authorized.AuthorizedToMap()
-	}
-
-	err = bridge.SetShareData(ctx, global, share)
+	})
 	if err != nil {
 		log.Error("scripts.%s.%s %s", script.ID, process.Method, err.Error())
 		exception.New("scripts.%s.%s %s", 500, script.ID, process.Method, err.Error()).Throw()
@@ -929,7 +673,6 @@ func (script *Script) execStandardStandalone(process *process.Process) interface
 		exception.Err(err, 500).Throw()
 		return nil
 	}
-	defer bridge.FreeJsValue(jsRes)
 
 	goRes, err := bridge.GoValue(jsRes, ctx)
 	if err != nil {

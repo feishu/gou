@@ -1,7 +1,0 @@
-{
-  "select": ["id", "name"],
-  "wheres": [
-    { "field": "status", "op": "=", "value": "active" }
-  ]
-}
-

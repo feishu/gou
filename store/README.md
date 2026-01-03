@@ -4,23 +4,21 @@ The Store package provides a unified interface for key-value storage with suppor
 
 ## Features
 
-- **Unified Interface**: Consistent API across LRU cache, Redis, MongoDB, and Xun implementations
+- **Unified Interface**: Consistent API across LRU cache, Redis, MongoDB, and Badger implementations
 - **Complete API**: 25+ methods covering key-value and list operations
-- **Wildcard Delete**: Pattern-based key deletion with `*` wildcard support
-- **Pattern-based Keys/Len**: Query keys and count by pattern (e.g., `Keys("user:*")`, `Len("chat:*")`)
 - **MongoDB-style API**: Familiar operations for developers using MongoDB
 - **List Operations**: Full support for array/list data structures
 - **Pagination Support**: Built-in pagination with `ArrayPage` and `ArraySlice`
 - **Thread Safety**: Full concurrency support with comprehensive stress testing
 - **Type Safety**: Strongly typed interface with Go generics support
-- **Database Storage**: Xun driver for database-backed persistent storage with LRU cache layer
+- **Embedded Storage**: Badger support for applications requiring local persistence
 
 ## Supported Backends
 
 - **LRU Cache**: In-memory cache with LRU eviction
 - **Redis**: Distributed cache using Redis lists
 - **MongoDB**: Document-based storage using MongoDB arrays
-- **Xun**: Database-backed storage with LRU cache and async persistence
+- **Badger**: Embedded key-value database with persistent storage
 
 ## Complete API Reference
 
@@ -51,23 +49,11 @@ err := store.Set("mykey", "myvalue", time.Hour)
 
 #### Del
 
-Delete a key or keys matching a pattern.
+Delete a key.
 
 ```go
-// Delete a single key
 err := store.Del("mykey")
-
-// Delete all keys matching a pattern (wildcard support)
-err := store.Del("user:123:*")    // Delete all keys starting with "user:123:"
-err := store.Del("chat:*")        // Delete all keys starting with "chat:"
-err := store.Del("session:456:*") // Delete all keys starting with "session:456:"
 ```
-
-**Wildcard Pattern:**
-
-- Use `*` as a suffix wildcard to match multiple keys
-- Pattern `user:123:*` matches `user:123:name`, `user:123:email`, `user:123:settings`, etc.
-- Useful for cleaning up namespaced data (e.g., user sessions, chat history, cache invalidation)
 
 #### Has
 
@@ -79,43 +65,19 @@ exists := store.Has("mykey")
 
 #### Len
 
-Get the total number of keys in the store, optionally filtered by pattern.
+Get the total number of keys in the store.
 
 ```go
-// Get total count
 count := store.Len()
-
-// Get count matching pattern
-userCount := store.Len("user:*")           // Count all user keys
-user123Count := store.Len("user:123:*")    // Count all keys for user 123
 ```
-
-**Pattern Support:**
-
-- Use `*` as a suffix wildcard to match multiple keys
-- Pattern `user:*` matches `user:123:name`, `user:456:email`, etc.
-- Empty pattern or no pattern returns total count
 
 #### Keys
 
-Get all keys in the store, optionally filtered by pattern.
+Get all keys in the store.
 
 ```go
-// Get all keys
 allKeys := store.Keys()
-
-// Get keys matching pattern
-userKeys := store.Keys("user:*")           // All user keys
-user123Keys := store.Keys("user:123:*")    // All keys for user 123
-chatKeys := store.Keys("chat:*")           // All chat keys
 ```
-
-**Pattern Support:**
-
-- Use `*` as a suffix wildcard to match multiple keys
-- Pattern `user:123:*` matches `user:123:name`, `user:123:email`, `user:123:settings`, etc.
-- Empty pattern or no pattern returns all keys
-- Useful for listing namespaced data (e.g., user data, chat history, cache entries)
 
 #### Clear
 
@@ -189,43 +151,6 @@ values := store.GetSetMulti(keys, time.Hour, func(key string) (interface{}, erro
     return fmt.Sprintf("default_%s", key), nil
 })
 ```
-
-### Atomic Counter Operations
-
-#### Incr
-
-Increment a numeric value and return the new value.
-
-```go
-// Increment by 1
-newValue, err := store.Incr("counter", 1)
-
-// Increment by 10
-newValue, err := store.Incr("counter", 10)
-
-// Increment non-existent key (starts from 0)
-newValue, err := store.Incr("new_counter", 5) // Returns 5
-```
-
-#### Decr
-
-Decrement a numeric value and return the new value.
-
-```go
-// Decrement by 1
-newValue, err := store.Decr("counter", 1)
-
-// Decrement by 10 (can go negative)
-newValue, err := store.Decr("counter", 10)
-```
-
-**Use Cases:**
-
-- Page view counters
-- Rate limiting
-- Inventory tracking
-- Session counters
-- Distributed locks with timeouts
 
 ## List Operations API
 
@@ -484,11 +409,9 @@ fmt.Printf("Unique tags: %v\n", tags) // Output: [go database cache]
 - Stores lists as `[]interface{}` in memory
 - Fast access but limited by memory
 - No persistence across restarts
-- **TTL support**: Lazy expiration check on Get/Has operations
 - **Thread-safe operations** with read-write mutex protection
 - **Copy-on-write** semantics to prevent data races
 - Returns data copies to prevent external modification
-- **Wildcard delete**: Iterates all keys and matches prefix pattern
 
 ### Redis Implementation
 
@@ -497,7 +420,6 @@ fmt.Printf("Unique tags: %v\n", tags) // Output: [go database cache]
 - Atomic operations
 - JSON serialization for complex data types
 - Uses Lua scripts for complex operations like `AddToSet`
-- **Wildcard delete**: Uses `SCAN` + `DEL` for safe pattern deletion
 
 ### MongoDB Implementation
 
@@ -506,19 +428,16 @@ fmt.Printf("Unique tags: %v\n", tags) // Output: [go database cache]
 - Aggregation pipeline for complex queries
 - Native support for array operations
 - Persistent and scalable
-- **Wildcard delete**: Uses regex pattern with `DeleteMany`
 
-### Xun Implementation
+### Badger Implementation
 
-- Database-backed storage using the Xun ORM
-- LRU cache layer for read performance optimization
-- Asynchronous batch persistence (configurable interval, default 1 minute)
-- Lazy loading - data loaded from database on first access
-- Automatic table creation and schema management
-- TTL support with background cleanup goroutine
-- Write-through cache with dirty tracking
-- Supports MySQL, PostgreSQL, SQLite, and other databases via Xun connectors
-- **Wildcard delete**: Uses SQL `LIKE` pattern for efficient batch deletion
+- Embedded key-value database with no external dependencies
+- JSON serialization for List operations
+- File-based persistent storage
+- **Thread-safe operations** with read-write mutex protection
+- Automatic directory creation for database path
+- High-performance LSM-tree based storage engine
+- Configurable database path (relative to application root)
 
 ## Configuration
 
@@ -542,25 +461,17 @@ store, err := store.New(redisConnector, store.Option{})
 store, err := store.New(mongoConnector, store.Option{})
 ```
 
-### Xun (Database)
+### Badger
 
 ```go
-// Using default database connector
-store, err := store.New(nil, store.Option{
-    "type": "xun",
-    "table": "__my_store",      // Table name (default: __store_default)
-    "connector": "default",      // Database connector (default: default)
-})
+// Default path (relative to application root)
+store, err := store.New(nil, store.Option{"driver": "badger", "path": "badger/db"})
 
-// With custom cache size and intervals
-store, err := store.New(nil, store.Option{
-    "type": "xun",
-    "table": "__my_store",
-    "connector": "default",
-    "cache_size": 10240,         // LRU cache size (default: 10240)
-    "persist_interval": 60,      // Async persistence interval in seconds (default: 60)
-    "cleanup_interval": 5,       // Expired data cleanup interval in minutes (default: 5)
-})
+// Absolute path
+store, err := store.New(nil, store.Option{"driver": "badger", "path": "/var/lib/myapp/badger"})
+
+// Current directory relative path
+store, err := store.New(nil, store.Option{"driver": "badger", "path": "./data/badger"})
 ```
 
 ## Testing
@@ -581,18 +492,13 @@ go test ./store -v -run TestLRU
 go test ./store -v -run TestLRUConcurrency
 go test ./store -v -run TestRedisConcurrency
 go test ./store -v -run TestMongoConcurrency
-go test ./store -v -run TestXunConcurrency
-
-# Run TTL tests
-go test ./store -v -run TestLRUTTL
-go test ./store -v -run TestRedisTTL
-go test ./store -v -run TestMongoTTL
-go test ./store -v -run TestXunTTL
+go test ./store -v -run TestBadgerConcurrency
 
 # Run benchmarks
 go test ./store -bench=BenchmarkLRU -v
 go test ./store -bench=BenchmarkRedis -v
 go test ./store -bench=BenchmarkMongo -v
+go test ./store -bench=BenchmarkBadger -v
 ```
 
 The test suite covers:
@@ -601,9 +507,6 @@ The test suite covers:
 - Edge cases and error conditions
 - Pagination functionality
 - Set operations and uniqueness
-- **Wildcard pattern deletion** across all backends
-- **Atomic counter operations** (Incr/Decr) across all backends
-- **TTL expiration testing** for LRU, Redis, MongoDB, and Xun
 - **Concurrency stress testing** (100 goroutines)
 - **Memory leak detection** with 10MB threshold
 - **Goroutine leak detection**
@@ -635,14 +538,14 @@ All store implementations are designed to be **thread-safe** and support concurr
 - Document-level locking ensures consistency
 - Aggregation pipelines are atomic and isolated
 
-### Xun
+### Badger
 
 - Uses `sync.RWMutex` for reader-writer lock protection
-- LRU cache layer with thread-safe access
-- Asynchronous batch writes reduce database contention
-- Dirty tracking ensures data consistency
-- Background goroutines for persistence and cleanup
-- Database transactions for atomic operations
+- Read operations use read locks for better concurrency
+- Write operations use exclusive write locks
+- JSON serialization ensures data consistency
+- Embedded database eliminates network-related concurrency issues
+- Persistent storage with crash recovery
 
 ### Stress Testing
 
@@ -715,15 +618,14 @@ if err != nil {
 - **O(N)** for array operations
 - Supports complex aggregation queries
 
-### Xun
+### Badger
 
-- **Best for**: Applications using existing database infrastructure
-- **O(1)** for cached reads (LRU cache hit)
-- **O(log N)** for database reads (with indexing)
-- Async persistence reduces write latency
-- Leverages existing database for persistence
-- Suitable for applications with database connectivity
-- **Note**: Up to `persist_interval` seconds of data may be lost on crash
+- **Best for**: Embedded applications, single-node deployments
+- **O(log N)** for most operations (LSM-tree based)
+- **O(N)** for list operations (JSON serialization)
+- No network latency, embedded storage
+- Persistent across application restarts
+- Suitable for applications requiring local data persistence
 
 ## Migration Guide
 

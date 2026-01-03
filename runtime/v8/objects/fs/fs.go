@@ -1232,6 +1232,6 @@ func (obj *Object) error(info *v8go.FunctionCallbackInfo, err error) *v8go.Value
 
 func (obj *Object) errorString(info *v8go.FunctionCallbackInfo, err string) *v8go.Value {
 	msg := fmt.Sprintf("FS: %s", err)
-	log.Error("%s", msg)
+	log.Error(msg)
 	return bridge.JsException(info.Context(), msg)
 }

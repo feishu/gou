@@ -60,45 +60,11 @@ func (store *Store) Set(key string, value interface{}, ttl time.Duration) error 
 }
 
 // Del remove is used to purge a key from the store
-// Supports wildcard pattern with * (e.g., "user:123:*")
 func (store *Store) Del(key string) error {
-	// Check if key contains wildcard
-	if strings.Contains(key, "*") {
-		return store.delPattern(key)
-	}
 	key = fmt.Sprintf("%s%s", store.Option.Prefix, key)
 	err := store.rdb.Del(context.Background(), key).Err()
 	if err != nil {
 		return err
-	}
-	return nil
-}
-
-// delPattern deletes all keys matching the pattern using SCAN + DEL
-func (store *Store) delPattern(pattern string) error {
-	ctx := context.Background()
-	fullPattern := fmt.Sprintf("%s%s", store.Option.Prefix, pattern)
-
-	var cursor uint64
-	for {
-		var keys []string
-		var err error
-		keys, cursor, err = store.rdb.Scan(ctx, cursor, fullPattern, 100).Result()
-		if err != nil {
-			log.Error("Store redis delPattern scan %s: %s", pattern, err.Error())
-			return err
-		}
-
-		if len(keys) > 0 {
-			if err := store.rdb.Del(ctx, keys...).Err(); err != nil {
-				log.Error("Store redis delPattern del %s: %s", pattern, err.Error())
-				return err
-			}
-		}
-
-		if cursor == 0 {
-			break
-		}
 	}
 	return nil
 }
@@ -112,17 +78,8 @@ func (store *Store) Has(key string) bool {
 }
 
 // Len returns the number of stored entries (**not O(1)**)
-// Optional pattern parameter supports * wildcard (e.g., "user:*")
-func (store *Store) Len(pattern ...string) int {
-	// Build the pattern
-	var fullPattern string
-	if len(pattern) > 0 && pattern[0] != "" {
-		fullPattern = store.Option.Prefix + pattern[0]
-	} else {
-		fullPattern = store.Option.Prefix + "*"
-	}
-
-	script := fmt.Sprintf("return #redis.pcall('keys', '%s')", fullPattern)
+func (store *Store) Len() int {
+	script := fmt.Sprintf("return #redis.pcall('keys', '%s*')", store.Option.Prefix)
 	cmd := store.rdb.Eval(context.Background(), script, []string{})
 	v, err := cmd.Result()
 	if err != nil {
@@ -143,19 +100,9 @@ func (store *Store) Len(pattern ...string) int {
 }
 
 // Keys returns all the cached keys
-// Optional pattern parameter supports * wildcard (e.g., "user:*")
-func (store *Store) Keys(pattern ...string) []string {
+func (store *Store) Keys() []string {
 	prefix := store.Option.Prefix
-
-	// Build the pattern
-	var fullPattern string
-	if len(pattern) > 0 && pattern[0] != "" {
-		fullPattern = prefix + pattern[0]
-	} else {
-		fullPattern = prefix + "*"
-	}
-
-	keys, err := store.rdb.Keys(context.Background(), fullPattern).Result()
+	keys, err := store.rdb.Keys(context.Background(), prefix+"*").Result()
 	if err != nil {
 		log.Error("Store redis Keys:%s", err.Error())
 		return []string{}
@@ -479,27 +426,5 @@ func (store *Store) ArrayAll(key string) ([]interface{}, error) {
 		result[i] = value
 	}
 
-	return result, nil
-}
-
-// Incr increments a numeric value and returns the new value
-func (store *Store) Incr(key string, delta int64) (int64, error) {
-	key = fmt.Sprintf("%s%s", store.Option.Prefix, key)
-	result, err := store.rdb.IncrBy(context.Background(), key, delta).Result()
-	if err != nil {
-		log.Error("Store redis Incr %s: %s", key, err.Error())
-		return 0, err
-	}
-	return result, nil
-}
-
-// Decr decrements a numeric value and returns the new value
-func (store *Store) Decr(key string, delta int64) (int64, error) {
-	key = fmt.Sprintf("%s%s", store.Option.Prefix, key)
-	result, err := store.rdb.DecrBy(context.Background(), key, delta).Result()
-	if err != nil {
-		log.Error("Store redis Decr %s: %s", key, err.Error())
-		return 0, err
-	}
 	return result, nil
 }

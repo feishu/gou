@@ -1,7 +1,0 @@
-{
-  "from": "users",
-  "wheres": [
-    { "field": "status", "op": "=", "value": "active" }
-  ]
-}
-

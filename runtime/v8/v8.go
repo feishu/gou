@@ -1,7 +1,6 @@
 package v8
 
 import (
-	"github.com/yaoapp/gou/runtime/v8/bridge"
 	"github.com/yaoapp/gou/runtime/v8/store"
 )
 
@@ -12,8 +11,6 @@ func Start(option *Option) error {
 	option.Validate()
 	runtimeOption = option
 	initialize()
-	// Note: Periodic GC for goMaps is automatically started on first RegisterGoObject call
-	// No explicit initialization needed here
 	return nil
 }
 
@@ -30,7 +27,4 @@ func Stop() {
 		return true
 	})
 	release()
-
-	// Stop periodic garbage collection for goMaps
-	bridge.StopPeriodicGC()
 }

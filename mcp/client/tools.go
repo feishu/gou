@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/yaoapp/gou/mcp/types"
@@ -69,8 +68,7 @@ func (c *Client) ListTools(ctx context.Context, cursor string) (*types.ListTools
 }
 
 // CallTool invokes a specific tool on the server
-// extraArgs are ignored for HTTP/SSE/STDIO transports (only used for Process transport)
-func (c *Client) CallTool(ctx context.Context, name string, arguments interface{}, extraArgs ...interface{}) (*types.CallToolResponse, error) {
+func (c *Client) CallTool(ctx context.Context, name string, arguments interface{}) (*types.CallToolResponse, error) {
 	if c.MCPClient == nil {
 		return nil, fmt.Errorf("MCP client not initialized")
 	}
@@ -84,9 +82,6 @@ func (c *Client) CallTool(ctx context.Context, name string, arguments interface{
 	if initResult.Capabilities.Tools == nil {
 		return nil, fmt.Errorf("server does not support tools")
 	}
-
-	// Note: extraArgs are not used in HTTP/SSE/STDIO transports
-	// They are only relevant for Process-based transport
 
 	// Create call tool request
 	request := mcp.CallToolRequest{
@@ -137,10 +132,8 @@ func (c *Client) CallTool(ctx context.Context, name string, arguments interface{
 	return response, nil
 }
 
-// CallTools calls multiple tools in sequence
-// Tools are executed one by one, ensuring order and avoiding race conditions
-// extraArgs are ignored for HTTP/SSE/STDIO transports (only used for Process transport)
-func (c *Client) CallTools(ctx context.Context, tools []types.ToolCall, extraArgs ...interface{}) (*types.CallToolsResponse, error) {
+// CallToolsBatch calls multiple tools in sequence
+func (c *Client) CallToolsBatch(ctx context.Context, tools []types.ToolCall) (*types.CallToolsBatchResponse, error) {
 	if c.MCPClient == nil {
 		return nil, fmt.Errorf("MCP client not initialized")
 	}
@@ -155,10 +148,7 @@ func (c *Client) CallTools(ctx context.Context, tools []types.ToolCall, extraArg
 		return nil, fmt.Errorf("server does not support tools")
 	}
 
-	// Note: extraArgs are not used - standard MCP protocol doesn't support them
-	// They are only used in Process-based transport
-
-	// Call each tool individually (sequential processing)
+	// Call each tool individually (batch processing)
 	results := make([]types.CallToolResponse, len(tools))
 	for i, tool := range tools {
 		result, err := c.CallTool(ctx, tool.Name, tool.Arguments)
@@ -178,67 +168,7 @@ func (c *Client) CallTools(ctx context.Context, tools []types.ToolCall, extraArg
 		}
 	}
 
-	return &types.CallToolsResponse{
-		Results: results,
-	}, nil
-}
-
-// CallToolsParallel calls multiple tools concurrently
-// All tools are executed in parallel for better performance
-// Note: Results order matches the input order, but execution is concurrent
-// extraArgs are ignored for HTTP/SSE/STDIO transports (only used for Process transport)
-func (c *Client) CallToolsParallel(ctx context.Context, tools []types.ToolCall, extraArgs ...interface{}) (*types.CallToolsResponse, error) {
-	if c.MCPClient == nil {
-		return nil, fmt.Errorf("MCP client not initialized")
-	}
-
-	if !c.IsInitialized() {
-		return nil, fmt.Errorf("MCP client not initialized - call Initialize() first")
-	}
-
-	// Check if server supports tools
-	initResult := c.GetInitResult()
-	if initResult.Capabilities.Tools == nil {
-		return nil, fmt.Errorf("server does not support tools")
-	}
-
-	// Note: extraArgs are not used - standard MCP protocol doesn't support them
-	// They are only used in Process-based transport
-
-	// Call tools concurrently
-	results := make([]types.CallToolResponse, len(tools))
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
-	for i, tool := range tools {
-		wg.Add(1)
-		go func(idx int, t types.ToolCall) {
-			defer wg.Done()
-
-			result, err := c.CallTool(ctx, t.Name, t.Arguments)
-
-			mu.Lock()
-			defer mu.Unlock()
-
-			if err != nil {
-				results[idx] = types.CallToolResponse{
-					Content: []types.ToolContent{
-						{
-							Type: types.ToolContentTypeText,
-							Text: fmt.Sprintf("Error calling tool %s: %v", t.Name, err),
-						},
-					},
-					IsError: true,
-				}
-			} else {
-				results[idx] = *result
-			}
-		}(i, tool)
-	}
-
-	wg.Wait()
-
-	return &types.CallToolsResponse{
+	return &types.CallToolsBatchResponse{
 		Results: results,
 	}, nil
 }

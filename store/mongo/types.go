@@ -6,15 +6,14 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
-// Store mongo store
+// Store redis store
 type Store struct {
 	Database   *mongo.Database
 	Collection *mongo.Collection
 	Option     Option
 }
 
-// Option mongo store option
+// Option redis option
 type Option struct {
 	Timeout time.Duration
-	Prefix  string // Key prefix for namespacing
 }

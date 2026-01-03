@@ -1,9 +1,0 @@
-{
-  "select": ["category", ":COUNT(id) as count"],
-  "from": "products",
-  "groups": [
-    { "rollup": "all" },
-    { "field": "" }
-  ]
-}
-

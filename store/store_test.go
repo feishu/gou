@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,131 +12,39 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/yaoapp/gou/application"
 	"github.com/yaoapp/gou/connector"
-	"github.com/yaoapp/gou/store/lru"
-	"github.com/yaoapp/gou/store/xun"
 	"github.com/yaoapp/kun/any"
-	"github.com/yaoapp/xun/capsule"
 )
-
-func TestMain(m *testing.M) {
-	// Initialize database connection for xun store tests
-	TestDriver := os.Getenv("GOU_TEST_DB_DRIVER")
-	TestDSN := os.Getenv("GOU_TEST_DSN")
-	if TestDSN != "" {
-		switch TestDriver {
-		case "sqlite3":
-			capsule.AddConn("primary", "sqlite3", TestDSN).SetAsGlobal()
-		default:
-			capsule.AddConn("primary", "mysql", TestDSN).SetAsGlobal()
-		}
-	}
-
-	// Initialize application and connectors
-	root := os.Getenv("GOU_TEST_APPLICATION")
-	if root != "" {
-		app, err := application.OpenFromDisk(root)
-		if err == nil {
-			application.Load(app)
-
-			// Load connectors
-			connectors := map[string]string{
-				"mysql":  filepath.Join("connectors", "mysql.conn.yao"),
-				"mongo":  filepath.Join("connectors", "mongo.conn.yao"),
-				"redis":  filepath.Join("connectors", "redis.conn.yao"),
-				"sqlite": filepath.Join("connectors", "sqlite.conn.yao"),
-			}
-
-			for id, file := range connectors {
-				connector.Load(file, id)
-			}
-		}
-	}
-
-	os.Exit(m.Run())
-}
 
 func TestLoad(t *testing.T) {
 
 }
 
 func TestLRU(t *testing.T) {
-	store := newStore(t, nil)
-	testBasic(t, store)
-	testMulti(t, store)
-	testList(t, store)
-	testDelPattern(t, store)
-	testIncrDecr(t, store)
-	testKeysLenPattern(t, store)
-
-	// Test prefix with two isolated stores
-	store1, _ := lru.NewWithOption(lru.Option{Size: 1024, Prefix: "ns1:"})
-	store2, _ := lru.NewWithOption(lru.Option{Size: 1024, Prefix: "ns2:"})
-	testPrefix(t, store1, store2)
+	lru := newStore(t, nil)
+	testBasic(t, lru)
+	testMulti(t, lru)
+	testList(t, lru)
 }
 
 func TestRedis(t *testing.T) {
-	store := newStore(t, getConnector(t, "redis"))
-	testBasic(t, store)
-	testMulti(t, store)
-	testList(t, store)
-	testDelPattern(t, store)
-	testIncrDecr(t, store)
-	testKeysLenPattern(t, store)
-
-	// Test prefix with two isolated stores
-	store1 := newStoreWithPrefix(t, getConnector(t, "redis"), "ns1:")
-	store2 := newStoreWithPrefix(t, getConnector(t, "redis"), "ns2:")
-	testPrefix(t, store1, store2)
+	redis := newStore(t, getConnector(t, "redis"))
+	testBasic(t, redis)
+	testMulti(t, redis)
+	testList(t, redis)
 }
 
 func TestMongo(t *testing.T) {
-	store := newStore(t, getConnector(t, "mongo"))
-	testBasic(t, store)
-	testMulti(t, store)
-	testList(t, store)
-	testDelPattern(t, store)
-	testIncrDecr(t, store)
-	testKeysLenPattern(t, store)
-
-	// Test prefix with two isolated stores
-	store1 := newStoreWithPrefix(t, getConnector(t, "mongo"), "ns1:")
-	store2 := newStoreWithPrefix(t, getConnector(t, "mongo"), "ns2:")
-	testPrefix(t, store1, store2)
-}
-
-func TestXun(t *testing.T) {
-	store := newXunStore(t)
-	testBasic(t, store)
-	testMulti(t, store)
-	testList(t, store)
-	testDelPattern(t, store)
-	testIncrDecr(t, store)
-	testKeysLenPattern(t, store)
-
-	// Test prefix with two isolated stores
-	store1 := newXunStoreWithPrefix(t, "ns1:")
-	store2 := newXunStoreWithPrefix(t, "ns2:")
-	testPrefix(t, store1, store2)
-}
-
-func TestLRUTTL(t *testing.T) {
-	lru := newStore(t, nil)
-	testTTL(t, lru)
-}
-
-func TestXunTTL(t *testing.T) {
-	xunStore := newXunStore(t)
-	testTTL(t, xunStore)
-}
-
-func TestRedisTTL(t *testing.T) {
-	redis := newStore(t, getConnector(t, "redis"))
-	testTTL(t, redis)
-}
-
-func TestMongoTTL(t *testing.T) {
 	mongo := newStore(t, getConnector(t, "mongo"))
-	testTTL(t, mongo)
+	testBasic(t, mongo)
+	testMulti(t, mongo)
+	testList(t, mongo)
+}
+
+func TestBadger(t *testing.T) {
+	badger := newBadgerStore(t)
+	testBasic(t, badger)
+	testMulti(t, badger)
+	testList(t, badger)
 }
 
 func TestLRUConcurrency(t *testing.T) {
@@ -161,37 +68,21 @@ func TestMongoConcurrency(t *testing.T) {
 	testGoroutineLeak(t, mongo)
 }
 
-func TestXunConcurrency(t *testing.T) {
-	xunStore := newXunStore(t)
-	testConcurrency(t, xunStore)
-	testMemoryLeak(t, xunStore)
-	testGoroutineLeak(t, xunStore)
+func TestBadgerConcurrency(t *testing.T) {
+	badger := newBadgerStore(t)
+	testConcurrency(t, badger)
+	testMemoryLeak(t, badger)
+	testGoroutineLeak(t, badger)
 }
 
 func testBasic(t *testing.T, kv Store) {
 
 	var err error
 	kv.Clear()
-
-	// Test Del then Get/Has consistency (regression test for deleted key visibility bug)
-	kv.Set("del_test_key", "del_test_value", 0)
-	value, ok := kv.Get("del_test_key")
-	assert.True(t, ok)
-	assert.Equal(t, "del_test_value", value)
-	assert.True(t, kv.Has("del_test_key"))
-
-	// Delete the key
-	kv.Del("del_test_key")
-
-	// Both Get and Has should return false/not found after deletion
-	_, ok = kv.Get("del_test_key")
-	assert.False(t, ok, "Get should return false after Del")
-	assert.False(t, kv.Has("del_test_key"), "Has should return false after Del")
-
 	kv.Set("key1", "bar", 0)
 	kv.Set("key2", 1024, 0)
 	kv.Set("key3", 0.618, 0)
-	value, ok = kv.Get("key1")
+	value, ok := kv.Get("key1")
 	assert.True(t, ok)
 	assert.Equal(t, "bar", value)
 
@@ -302,141 +193,22 @@ func newStore(t *testing.T, c connector.Connector) Store {
 	return store
 }
 
-func newStoreWithPrefix(t *testing.T, c connector.Connector, prefix string) Store {
-	store, err := New(c, Option{"size": 20480, "prefix": prefix})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return store
-}
+func newBadgerStore(t *testing.T) Store {
+	// Create a temporary directory for testing
+	tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("badger_test_%d", time.Now().UnixNano()))
 
-func newXunStore(t *testing.T) Store {
-	// Initialize database connection
-	dbconnect(t)
-
-	// Create xun store with option
-	tableName := fmt.Sprintf("__store_test_%d", time.Now().UnixNano())
-	store, err := xun.New(xun.Option{
-		Table:           tableName,
-		Connector:       "default",
-		CacheSize:       1024,
-		CleanupInterval: time.Second * 5,
-	})
+	// Create badger store with path option - like LRU with size
+	store, err := New(nil, Option{"path": tempDir})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Schedule cleanup
 	t.Cleanup(func() {
-		store.Clear()
-		store.Close()
-		// Drop the test table
-		capsule.Query().Table(tableName).Delete()
+		os.RemoveAll(tempDir)
 	})
 
 	return store
-}
-
-func newXunStoreWithPrefix(t *testing.T, prefix string) Store {
-	// Initialize database connection
-	dbconnect(t)
-
-	// Create xun store with option
-	tableName := "__store_prefix_test"
-	store, err := xun.New(xun.Option{
-		Table:           tableName,
-		Connector:       "default",
-		Prefix:          prefix,
-		CacheSize:       1024,
-		CleanupInterval: time.Second * 5,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Schedule cleanup
-	t.Cleanup(func() {
-		store.Clear()
-		store.Close()
-	})
-
-	return store
-}
-
-func dbconnect(t *testing.T) {
-	if capsule.Global != nil {
-		return // Already connected
-	}
-
-	TestDriver := os.Getenv("GOU_TEST_DB_DRIVER")
-	TestDSN := os.Getenv("GOU_TEST_DSN")
-
-	if TestDSN == "" {
-		t.Fatal("GOU_TEST_DSN environment variable is required for database tests")
-		return
-	}
-
-	// Connect to database
-	switch TestDriver {
-	case "sqlite3":
-		capsule.AddConn("primary", "sqlite3", TestDSN).SetAsGlobal()
-	default:
-		capsule.AddConn("primary", "mysql", TestDSN).SetAsGlobal()
-	}
-}
-
-func testTTL(t *testing.T, kv Store) {
-	kv.Clear()
-
-	// Use unique key to avoid conflicts
-	ttlKey := fmt.Sprintf("ttl_key_%d", time.Now().UnixNano())
-
-	// Test TTL expiration
-	err := kv.Set(ttlKey, "ttl_value", time.Second*2)
-	assert.Nil(t, err)
-
-	// Value should exist immediately
-	value, ok := kv.Get(ttlKey)
-	assert.True(t, ok, "Get immediately should return true")
-	assert.Equal(t, "ttl_value", value)
-
-	// Has should return true
-	assert.True(t, kv.Has(ttlKey), "Has immediately should return true")
-
-	// Len should include the key
-	assert.Equal(t, 1, kv.Len(), "Len immediately should be 1")
-
-	// Keys should include the key
-	assert.Contains(t, kv.Keys(), ttlKey, "Keys immediately should contain the key")
-
-	// Wait for TTL to expire
-	time.Sleep(time.Second * 3)
-
-	// Value should be gone after TTL
-	_, ok = kv.Get(ttlKey)
-	assert.False(t, ok, "Get after TTL should return false")
-
-	// Has should return false
-	assert.False(t, kv.Has(ttlKey), "Has after TTL should return false")
-
-	// Len should be 0
-	assert.Equal(t, 0, kv.Len(), "Len after TTL should be 0")
-
-	// Keys should be empty
-	assert.Empty(t, kv.Keys(), "Keys after TTL should be empty")
-
-	// Test that non-TTL values persist
-	noTTLKey := fmt.Sprintf("no_ttl_key_%d", time.Now().UnixNano())
-	err = kv.Set(noTTLKey, "no_ttl_value", 0)
-	assert.Nil(t, err)
-
-	time.Sleep(time.Second * 1)
-
-	value, ok = kv.Get(noTTLKey)
-	assert.True(t, ok)
-	assert.Equal(t, "no_ttl_value", value)
-
-	kv.Clear()
 }
 
 func getConnector(t *testing.T, name string) connector.Connector {
@@ -446,10 +218,15 @@ func getConnector(t *testing.T, name string) connector.Connector {
 func prepareStores(t *testing.T) {
 
 	stores := map[string]string{
-		"cache": filepath.Join("stores", "cache.lru.yao"),
-		"share": filepath.Join("stores", "share.redis.yao"),
-		"data":  filepath.Join("stores", "data.mongo.yao"),
+		"cache":  filepath.Join("stores", "cache.lru.yao"),
+		"share":  filepath.Join("stores", "share.redis.yao"),
+		"data":   filepath.Join("stores", "data.mongo.yao"),
+		"badger": filepath.Join("stores", "local.badger.yao"),
 	}
+
+	// Remove the data store (For cleaning the stores whitch created by the test)
+	var path = filepath.Join(os.Getenv("GOU_TEST_APPLICATION"), "badger", "db")
+	os.RemoveAll(path)
 
 	for id, file := range stores {
 		_, err := Load(file, id)
@@ -482,307 +259,12 @@ func prepare(t *testing.T) {
 	}
 }
 
-func testIncrDecr(t *testing.T, kv Store) {
-	// Clear any existing data
-	kv.Clear()
-
-	// Test Incr on non-existent key (should start from 0)
-	result, err := kv.Incr("counter", 1)
-	assert.Nil(t, err)
-	assert.Equal(t, int64(1), result)
-
-	// Test Incr on existing key
-	result, err = kv.Incr("counter", 5)
-	assert.Nil(t, err)
-	assert.Equal(t, int64(6), result)
-
-	// Verify the value via Get
-	value, ok := kv.Get("counter")
-	assert.True(t, ok)
-	assert.Equal(t, int64(6), int64(any.Of(value).CInt()))
-
-	// Test Decr
-	result, err = kv.Decr("counter", 2)
-	assert.Nil(t, err)
-	assert.Equal(t, int64(4), result)
-
-	// Test Decr with larger delta
-	result, err = kv.Decr("counter", 10)
-	assert.Nil(t, err)
-	assert.Equal(t, int64(-6), result)
-
-	// Test Incr with negative delta (same as Decr)
-	result, err = kv.Incr("counter", -4)
-	assert.Nil(t, err)
-	assert.Equal(t, int64(-10), result)
-
-	// Test Decr on non-existent key
-	result, err = kv.Decr("new_counter", 5)
-	assert.Nil(t, err)
-	assert.Equal(t, int64(-5), result)
-
-	kv.Clear()
-}
-
-// testPrefix tests prefix isolation between two stores
-func testPrefix(t *testing.T, store1, store2 Store) {
-	// Clear any existing data
-	store1.Clear()
-	store2.Clear()
-
-	// Test basic operations with prefixes
-	store1.Set("key1", "value1", 0)
-	store2.Set("key1", "value2", 0)
-
-	// Each store should see its own value
-	val1, ok1 := store1.Get("key1")
-	val2, ok2 := store2.Get("key1")
-
-	assert.True(t, ok1)
-	assert.True(t, ok2)
-	assert.Equal(t, "value1", val1)
-	assert.Equal(t, "value2", val2)
-
-	// Test Has
-	assert.True(t, store1.Has("key1"))
-	assert.False(t, store1.Has("key2"))
-
-	// Test Del
-	store1.Del("key1")
-	_, ok1 = store1.Get("key1")
-	val2, ok2 = store2.Get("key1")
-	assert.False(t, ok1)
-	assert.True(t, ok2)
-	assert.Equal(t, "value2", val2)
-
-	// Test Keys and Len with prefix
-	store1.Set("a", 1, 0)
-	store1.Set("b", 2, 0)
-	store1.Set("c", 3, 0)
-
-	keys := store1.Keys()
-	assert.Equal(t, 3, len(keys))
-	assert.Equal(t, 3, store1.Len())
-
-	// Keys should not have prefix (prefix is internal)
-	for _, k := range keys {
-		assert.False(t, strings.HasPrefix(k, "ns1:"), "Key should not have prefix: %s", k)
-		assert.False(t, strings.HasPrefix(k, "ns2:"), "Key should not have prefix: %s", k)
-	}
-
-	// Test Clear with prefix (should only clear prefixed keys)
-	store1.Clear()
-	assert.Equal(t, 0, store1.Len())
-	// store2 should still have its data
-	val2, ok2 = store2.Get("key1")
-	assert.True(t, ok2)
-	assert.Equal(t, "value2", val2)
-
-	// Test Del pattern with prefix
-	store1.Set("user:1:name", "Alice", 0)
-	store1.Set("user:1:email", "alice@test.com", 0)
-	store1.Set("user:2:name", "Bob", 0)
-
-	store1.Del("user:1:*")
-	assert.False(t, store1.Has("user:1:name"))
-	assert.False(t, store1.Has("user:1:email"))
-	assert.True(t, store1.Has("user:2:name"))
-
-	// Test Incr with prefix
-	result, err := store1.Incr("counter", 1)
-	assert.Nil(t, err)
-	assert.Equal(t, int64(1), result)
-
-	result, err = store1.Incr("counter", 5)
-	assert.Nil(t, err)
-	assert.Equal(t, int64(6), result)
-
-	// Test list operations with prefix
-	store1.Push("list", "a", "b", "c")
-	listLen := store1.ArrayLen("list")
-	assert.Equal(t, 3, listLen)
-
-	all, _ := store1.ArrayAll("list")
-	assert.Equal(t, 3, len(all))
-
-	// Test GetDel with prefix
-	store1.Set("temp", "tempvalue", 0)
-	val, ok := store1.GetDel("temp")
-	assert.True(t, ok)
-	assert.Equal(t, "tempvalue", val)
-	assert.False(t, store1.Has("temp"))
-}
-
-func testKeysLenPattern(t *testing.T, kv Store) {
-	// Clear any existing data
-	kv.Clear()
-
-	// Set up test data with different prefixes
-	kv.Set("user:123:name", "John", 0)
-	kv.Set("user:123:email", "john@example.com", 0)
-	kv.Set("user:123:age", 30, 0)
-	kv.Set("user:456:name", "Jane", 0)
-	kv.Set("user:456:email", "jane@example.com", 0)
-	kv.Set("chat:789:message1", "Hello", 0)
-	kv.Set("chat:789:message2", "World", 0)
-	kv.Set("other:key", "value", 0)
-
-	// Test Keys without pattern - should return all keys
-	allKeys := kv.Keys()
-	assert.Equal(t, 8, len(allKeys))
-
-	// Test Keys with empty pattern - should return all keys
-	allKeys = kv.Keys("")
-	assert.Equal(t, 8, len(allKeys))
-
-	// Test Len without pattern - should return total count
-	assert.Equal(t, 8, kv.Len())
-
-	// Test Len with empty pattern - should return total count
-	assert.Equal(t, 8, kv.Len(""))
-
-	// Test Keys with pattern - user:123:*
-	user123Keys := kv.Keys("user:123:*")
-	assert.Equal(t, 3, len(user123Keys))
-	assert.Contains(t, user123Keys, "user:123:name")
-	assert.Contains(t, user123Keys, "user:123:email")
-	assert.Contains(t, user123Keys, "user:123:age")
-
-	// Test Len with pattern - user:123:*
-	assert.Equal(t, 3, kv.Len("user:123:*"))
-
-	// Test Keys with pattern - user:*
-	userKeys := kv.Keys("user:*")
-	assert.Equal(t, 5, len(userKeys))
-
-	// Test Len with pattern - user:*
-	assert.Equal(t, 5, kv.Len("user:*"))
-
-	// Test Keys with pattern - chat:*
-	chatKeys := kv.Keys("chat:*")
-	assert.Equal(t, 2, len(chatKeys))
-	assert.Contains(t, chatKeys, "chat:789:message1")
-	assert.Contains(t, chatKeys, "chat:789:message2")
-
-	// Test Len with pattern - chat:*
-	assert.Equal(t, 2, kv.Len("chat:*"))
-
-	// Test Keys with pattern - other:*
-	otherKeys := kv.Keys("other:*")
-	assert.Equal(t, 1, len(otherKeys))
-	assert.Contains(t, otherKeys, "other:key")
-
-	// Test Len with pattern - other:*
-	assert.Equal(t, 1, kv.Len("other:*"))
-
-	// Test Keys with pattern - nonexistent:*
-	nonexistentKeys := kv.Keys("nonexistent:*")
-	assert.Equal(t, 0, len(nonexistentKeys))
-
-	// Test Len with pattern - nonexistent:*
-	assert.Equal(t, 0, kv.Len("nonexistent:*"))
-
-	// Test Keys with exact match pattern (no wildcard)
-	exactKeys := kv.Keys("user:123:name")
-	assert.Equal(t, 1, len(exactKeys))
-	assert.Contains(t, exactKeys, "user:123:name")
-
-	// Test Len with exact match pattern (no wildcard)
-	assert.Equal(t, 1, kv.Len("user:123:name"))
-
-	kv.Clear()
-}
-
-func testDelPattern(t *testing.T, kv Store) {
-	// Clear any existing data
-	kv.Clear()
-
-	// Set up test data with different prefixes
-	kv.Set("user:123:name", "John", 0)
-	kv.Set("user:123:email", "john@example.com", 0)
-	kv.Set("user:123:age", 30, 0)
-	kv.Set("user:456:name", "Jane", 0)
-	kv.Set("user:456:email", "jane@example.com", 0)
-	kv.Set("chat:789:message1", "Hello", 0)
-	kv.Set("chat:789:message2", "World", 0)
-	kv.Set("other:key", "value", 0)
-
-	// Verify all keys exist
-	assert.Equal(t, 8, kv.Len())
-
-	// Test deleting with pattern - delete all user:123:* keys
-	err := kv.Del("user:123:*")
-	assert.Nil(t, err)
-
-	// Verify user:123:* keys are deleted
-	assert.False(t, kv.Has("user:123:name"))
-	assert.False(t, kv.Has("user:123:email"))
-	assert.False(t, kv.Has("user:123:age"))
-
-	// Verify other keys still exist
-	assert.True(t, kv.Has("user:456:name"))
-	assert.True(t, kv.Has("user:456:email"))
-	assert.True(t, kv.Has("chat:789:message1"))
-	assert.True(t, kv.Has("chat:789:message2"))
-	assert.True(t, kv.Has("other:key"))
-
-	assert.Equal(t, 5, kv.Len())
-
-	// Test deleting with pattern - delete all chat:* keys
-	err = kv.Del("chat:*")
-	assert.Nil(t, err)
-
-	assert.False(t, kv.Has("chat:789:message1"))
-	assert.False(t, kv.Has("chat:789:message2"))
-	assert.Equal(t, 3, kv.Len())
-
-	// Test deleting with pattern - delete all user:* keys
-	err = kv.Del("user:*")
-	assert.Nil(t, err)
-
-	assert.False(t, kv.Has("user:456:name"))
-	assert.False(t, kv.Has("user:456:email"))
-	assert.Equal(t, 1, kv.Len())
-
-	// Verify other:key still exists
-	assert.True(t, kv.Has("other:key"))
-
-	// Test exact delete still works
-	err = kv.Del("other:key")
-	assert.Nil(t, err)
-	assert.False(t, kv.Has("other:key"))
-	assert.Equal(t, 0, kv.Len())
-
-	// Test deleting non-existent pattern (should not error)
-	err = kv.Del("nonexistent:*")
-	assert.Nil(t, err)
-
-	kv.Clear()
-}
-
 func testList(t *testing.T, kv Store) {
 	// Clear any existing data
 	kv.Clear()
 
-	// Test Del then list operations consistency (regression test for deleted key visibility bug)
-	err := kv.Push("del_list_test", "a", "b", "c")
-	assert.Nil(t, err)
-	assert.Equal(t, 3, kv.ArrayLen("del_list_test"))
-
-	// Delete the list
-	kv.Del("del_list_test")
-
-	// All list operations should return empty/not found after deletion
-	assert.Equal(t, 0, kv.ArrayLen("del_list_test"), "ArrayLen should return 0 after Del")
-	all, err := kv.ArrayAll("del_list_test")
-	assert.Nil(t, err)
-	assert.Equal(t, 0, len(all), "ArrayAll should return empty after Del")
-
-	_, err = kv.ArrayGet("del_list_test", 0)
-	assert.NotNil(t, err, "ArrayGet should return error after Del")
-
 	// Test Push operation
-	err = kv.Push("testlist", "item1", "item2", "item3")
+	err := kv.Push("testlist", "item1", "item2", "item3")
 	assert.Nil(t, err)
 
 	// Test ArrayLen

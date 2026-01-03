@@ -18,22 +18,11 @@ const (
 	TransportSSE TransportType = "sse"
 	// TransportStdio the Stdio transport
 	TransportStdio TransportType = "stdio"
-	// TransportProcess the Yao transport ( For Yao internal processes)
-	TransportProcess TransportType = "process"
 )
 
 // Protocol version
 const (
 	ProtocolVersion = "2025-06-18"
-)
-
-// SampleItemType represents the type of item for samples
-type SampleItemType string
-
-// Sample item types
-const (
-	SampleTool     SampleItemType = "tool"
-	SampleResource SampleItemType = "resource"
 )
 
 // Message types
@@ -52,7 +41,6 @@ type ClientDSL struct {
 	ID        string        `json:"id,omitempty"`      // The ID of the MCP Client (required)
 	Name      string        `json:"name"`              // The name of the MCP Client (required)
 	Version   string        `json:"version,omitempty"` // The version of the MCP Client
-	Type      string        `json:"type,omitempty"`    // The type of the MCP Client (e.g., "standard", "agent", "system")
 	Transport TransportType `json:"transport"`         // One of the TransportType (required)
 
 	types.MetaInfo
@@ -64,8 +52,7 @@ type ClientDSL struct {
 	EnableElicitation bool `json:"enable_elicitation,omitempty"` // Enable elicitation capability
 
 	// For HTTP, SSE transport
-	URL                string `json:"url,omitempty"`                 // For HTTP、SSE transport (optional)
-	Endpoint           string `json:"endpoint,omitempty"`            // API endpoint path (e.g., "/api/mcp")
+	URL                string `json:"url,omitempty"`                 // For HTTP、SSE transport
 	AuthorizationToken string `json:"authorization_token,omitempty"` // For HTTP、SSE transport
 
 	// For stdio transport
@@ -74,11 +61,6 @@ type ClientDSL struct {
 	Env       map[string]string `json:"env,omitempty"`       // for stdio transport
 
 	Timeout string `json:"timeout,omitempty"` // for HTTP、SSE transport (1s, 1m, 1h, 1d)
-
-	// For process transport - mapping data (tools, prompts, resources)
-	Tools     map[string]string `json:"tools,omitempty"`     // tool_name -> process_name mapping
-	Resources map[string]string `json:"resources,omitempty"` // resource_name -> process_name mapping
-	Prompts   map[string]string `json:"prompts,omitempty"`   // prompt_name -> process_name mapping
 }
 
 // ================================
@@ -126,13 +108,8 @@ type InitializeResponse struct {
 
 // Client and Server info
 type ClientInfo struct {
-	ID          string        `json:"id,omitempty"`          // Client ID
-	Name        string        `json:"name"`                  // Client name
-	Version     string        `json:"version,omitempty"`     // Client version
-	Type        string        `json:"type,omitempty"`        // Client type (standard, agent, system)
-	Transport   TransportType `json:"transport,omitempty"`   // Transport type
-	Label       string        `json:"label,omitempty"`       // Display label
-	Description string        `json:"description,omitempty"` // Description
+	Name    string `json:"name"`
+	Version string `json:"version"`
 }
 
 type ServerInfo struct {
@@ -282,12 +259,9 @@ type CallToolsBatchRequest struct {
 	Tools []ToolCall `json:"tools"`
 }
 
-type CallToolsResponse struct {
+type CallToolsBatchResponse struct {
 	Results []CallToolResponse `json:"results"`
 }
-
-// Deprecated: Use CallToolsResponse instead
-type CallToolsBatchResponse = CallToolsResponse
 
 // Prompt types
 type Prompt struct {
@@ -370,28 +344,7 @@ type EmbeddedResource struct {
 	Blob     string `json:"blob,omitempty"` // base64-encoded binary data
 }
 
-// Sample types - for training/example data from .jsonl files
-type SampleData struct {
-	Index    int    `json:"index"`               // Auto-generated index (set by loader)
-	Name     string `json:"name,omitempty"`      // Optional sample name
-	ItemName string `json:"item_name,omitempty"` // Tool/Resource name (set by loader)
-
-	// Multi-purpose fields (semantics depend on item type)
-	Input  map[string]interface{} `json:"input,omitempty"`  // For tools: input args; For resources: parsed from URI
-	Output interface{}            `json:"output,omitempty"` // For tools: expected output; Not used for resources
-	URI    string                 `json:"uri,omitempty"`    // For resources: full URI with params
-	Data   interface{}            `json:"data,omitempty"`   // For resources: response data
-
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`  // Optional metadata (e.g., description)
-	Timestamp string                 `json:"timestamp,omitempty"` // Optional timestamp
-}
-
-type ListSamplesResponse struct {
-	Samples []SampleData `json:"samples"`
-	Total   int          `json:"total"`
-}
-
-// Sampling types (LLM text generation - MCP protocol standard)
+// Sampling types
 type SamplingRequest struct {
 	Model          string                 `json:"model"`
 	Messages       []SamplingMessage      `json:"messages"`
@@ -519,52 +472,3 @@ const (
 	EventTypeError        = "error"
 	EventTypeMessage      = "message"
 )
-
-// ================================
-// MCP Mapping Data (for Process Transport)
-// ================================
-
-// ToolSchema represents a tool's input/output schema
-type ToolSchema struct {
-	Name         string          `json:"name"`
-	Description  string          `json:"description,omitempty"`
-	Process      string          `json:"process"`                  // Yao process name
-	InputSchema  json.RawMessage `json:"inputSchema"`              // JSON Schema for input
-	OutputSchema json.RawMessage `json:"outputSchema,omitempty"`   // Optional JSON Schema for output
-	ProcessArgs  []string        `json:"x-process-args,omitempty"` // Mapping from MCP arguments to Process positional args
-}
-
-// ResourceSchema represents a resource definition
-type ResourceSchema struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description,omitempty"`
-	Process     string                 `json:"process"` // Yao process name
-	URI         string                 `json:"uri"`     // URI template (e.g., "customer://{id}")
-	MimeType    string                 `json:"mimeType,omitempty"`
-	Parameters  []ResourceParameter    `json:"parameters,omitempty"` // URI parameters
-	Meta        map[string]interface{} `json:"meta,omitempty"`
-	ProcessArgs []string               `json:"x-process-args,omitempty"` // Mapping from URI/parameters to Process positional args
-}
-
-// ResourceParameter defines a parameter for a resource URI
-type ResourceParameter struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Required    bool   `json:"required,omitempty"`
-}
-
-// PromptSchema represents a prompt template definition
-type PromptSchema struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description,omitempty"`
-	Template    string                 `json:"template"` // Prompt template content
-	Arguments   []PromptArgument       `json:"arguments,omitempty"`
-	Meta        map[string]interface{} `json:"meta,omitempty"`
-}
-
-// MappingData contains all loaded schemas for a process-based MCP client
-type MappingData struct {
-	Tools     map[string]*ToolSchema     `json:"tools"`     // tool_name -> ToolSchema
-	Resources map[string]*ResourceSchema `json:"resources"` // resource_name -> ResourceSchema
-	Prompts   map[string]*PromptSchema   `json:"prompts"`   // prompt_name -> PromptSchema
-}

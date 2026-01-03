@@ -10,9 +10,6 @@ import (
 
 // Client the MCP client interface
 type Client interface {
-	// Client information
-	Info() *types.ClientInfo
-
 	// Connection management
 	Connect(ctx context.Context, options ...types.ConnectionOptions) error
 	Disconnect(ctx context.Context) error
@@ -31,18 +28,15 @@ type Client interface {
 
 	// Tool operations
 	ListTools(ctx context.Context, cursor string) (*types.ListToolsResponse, error)
-	CallTool(ctx context.Context, name string, arguments interface{}, extraArgs ...interface{}) (*types.CallToolResponse, error)
-	CallTools(ctx context.Context, tools []types.ToolCall, extraArgs ...interface{}) (*types.CallToolsResponse, error)
-	CallToolsParallel(ctx context.Context, tools []types.ToolCall, extraArgs ...interface{}) (*types.CallToolsResponse, error)
+	CallTool(ctx context.Context, name string, arguments interface{}) (*types.CallToolResponse, error)
+	CallToolsBatch(ctx context.Context, tools []types.ToolCall) (*types.CallToolsBatchResponse, error)
 
 	// Prompt operations
 	ListPrompts(ctx context.Context, cursor string) (*types.ListPromptsResponse, error)
 	GetPrompt(ctx context.Context, name string, arguments map[string]interface{}) (*types.GetPromptResponse, error)
 
-	// Sample operations - List and get training samples from .jsonl files
-	// itemType: types.SampleTool or types.SampleResource
-	ListSamples(ctx context.Context, itemType types.SampleItemType, itemName string) (*types.ListSamplesResponse, error)
-	GetSample(ctx context.Context, itemType types.SampleItemType, itemName string, index int) (*types.SampleData, error)
+	// Sampling operations (if supported by server)
+	CreateSampling(ctx context.Context, request types.SamplingRequest) (*types.SamplingResponse, error)
 
 	// Logging operations
 	SetLogLevel(ctx context.Context, level types.LogLevel) error
@@ -89,9 +83,8 @@ type Server interface {
 	HandleListPrompts(ctx context.Context, request types.ListPromptsRequest) (*types.ListPromptsResponse, error)
 	HandleGetPrompt(ctx context.Context, request types.GetPromptRequest) (*types.GetPromptResponse, error)
 
-	// Sample handlers - List and get training samples
-	HandleListSamples(ctx context.Context, toolName string) (*types.ListSamplesResponse, error)
-	HandleGetSample(ctx context.Context, toolName string, index int) (*types.SampleData, error)
+	// Sampling handlers (if capability is supported)
+	HandleCreateSampling(ctx context.Context, request types.SamplingRequest) (*types.SamplingResponse, error)
 
 	// Logging handlers
 	HandleSetLogLevel(ctx context.Context, request types.SetLogLevelRequest) error
@@ -139,8 +132,7 @@ type ToolProvider interface {
 	// List all available tools
 	ListTools(ctx context.Context, cursor string) ([]types.Tool, string, error)
 	// Execute a tool with given arguments
-	// extraArgs are optional additional arguments that will be appended to the process call
-	CallTool(ctx context.Context, name string, arguments interface{}, extraArgs ...interface{}) ([]types.ToolContent, error)
+	CallTool(ctx context.Context, name string, arguments interface{}) ([]types.ToolContent, error)
 	// Check if tool exists
 	HasTool(ctx context.Context, name string) bool
 	// Get tool schema
@@ -159,14 +151,12 @@ type PromptProvider interface {
 	GetPromptSchema(ctx context.Context, name string) (types.Prompt, error)
 }
 
-// SampleProvider provides sample data functionality
-type SampleProvider interface {
-	// List available samples for a tool or resource
-	ListSamples(ctx context.Context, itemType types.SampleItemType, itemName string) (*types.ListSamplesResponse, error)
-	// Get a specific sample by index
-	GetSample(ctx context.Context, itemType types.SampleItemType, itemName string, index int) (*types.SampleData, error)
-	// Check if samples are supported
-	SupportsSamples() bool
+// SamplingProvider provides sampling functionality
+type SamplingProvider interface {
+	// Create sampling request
+	CreateSampling(ctx context.Context, request types.SamplingRequest) (*types.SamplingResponse, error)
+	// Check if sampling is supported
+	SupportsSampling() bool
 }
 
 // LoggingProvider provides logging functionality
@@ -271,8 +261,8 @@ type Registry interface {
 	RegisterToolProvider(name string, provider ToolProvider) error
 	// Register prompt provider
 	RegisterPromptProvider(name string, provider PromptProvider) error
-	// Register sample provider
-	RegisterSampleProvider(name string, provider SampleProvider) error
+	// Register sampling provider
+	RegisterSamplingProvider(name string, provider SamplingProvider) error
 
 	// Get resource provider
 	GetResourceProvider(name string) (ResourceProvider, bool)
@@ -280,8 +270,8 @@ type Registry interface {
 	GetToolProvider(name string) (ToolProvider, bool)
 	// Get prompt provider
 	GetPromptProvider(name string) (PromptProvider, bool)
-	// Get sample provider
-	GetSampleProvider(name string) (SampleProvider, bool)
+	// Get sampling provider
+	GetSamplingProvider(name string) (SamplingProvider, bool)
 
 	// List all providers
 	ListProviders() map[string]interface{}
