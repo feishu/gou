@@ -1,6 +1,8 @@
 package v8
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,6 +74,43 @@ type Import struct {
 	Path    string
 	AbsPath string
 	Clause  string
+}
+
+// TransformErrorItem a structured TypeScript transform error
+type TransformErrorItem struct {
+	File   string
+	Line   int
+	Column int
+	Text   string
+}
+
+func (item TransformErrorItem) Error() string {
+	switch {
+	case item.Line > 0 && item.Column > 0:
+		return fmt.Sprintf("%s:%d:%d %s", item.File, item.Line, item.Column, item.Text)
+	case item.Line > 0:
+		return fmt.Sprintf("%s:%d %s", item.File, item.Line, item.Text)
+	default:
+		return fmt.Sprintf("%s %s", item.File, item.Text)
+	}
+}
+
+// TransformError TypeScript transform error set
+type TransformError struct {
+	Items []TransformErrorItem
+}
+
+func (err *TransformError) Error() string {
+	if err == nil || len(err.Items) == 0 {
+		return ""
+	}
+
+	lines := make([]string, 0, len(err.Items))
+	for _, item := range err.Items {
+		lines = append(lines, item.Error())
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // Isolate v8 Isolate

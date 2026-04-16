@@ -154,11 +154,7 @@ func TransformTS(file string, source []byte) ([]byte, error) {
 	})
 
 	if len(result.Errors) > 0 {
-		errors := []string{}
-		for _, err := range result.Errors {
-			errors = append(errors, fmt.Sprintf("%s", err.Text))
-		}
-		return nil, fmt.Errorf("transform ts code error: %v", strings.Join(errors, "\n"))
+		return nil, newTransformErrorFromMessages(file, result.Errors)
 	}
 
 	SourceMaps[file] = result.Map
@@ -317,7 +313,7 @@ func loadModule(file string, tsCode string) error {
 	}
 
 	if len(errors) > 0 {
-		return fmt.Errorf("transform module error: %v.\n%s", strings.Join(errors, "\n"), tsCode)
+		return newTransformErrorFromMessages(file, result.Errors)
 	}
 
 	if len(result.OutputFiles) > 1 {
@@ -420,7 +416,7 @@ func replaceImportCode(file string, source []byte) (string, []Import, error) {
 	})
 
 	if len(errors) > 0 {
-		err = fmt.Errorf("transform ts code error: %v", strings.Join(errors, "\n"))
+		err = newTransformErrorFromTexts(file, errors)
 	}
 
 	return tsCode, imports, err
@@ -462,6 +458,67 @@ func getImportPath(file string, path string) (string, error) {
 	}
 
 	return file, nil
+}
+
+func newTransformErrorFromMessages(defaultFile string, messages []api.Message) error {
+	items := make([]TransformErrorItem, 0, len(messages))
+	for _, message := range messages {
+		items = append(items, transformErrorItemFromMessage(defaultFile, message))
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return &TransformError{Items: items}
+}
+
+func newTransformErrorFromTexts(defaultFile string, texts []string) error {
+	items := make([]TransformErrorItem, 0, len(texts))
+	for _, text := range texts {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			continue
+		}
+		items = append(items, TransformErrorItem{
+			File: normalizeTransformErrorFile(defaultFile, ""),
+			Text: text,
+		})
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return &TransformError{Items: items}
+}
+
+func transformErrorItemFromMessage(defaultFile string, message api.Message) TransformErrorItem {
+	item := TransformErrorItem{
+		File: normalizeTransformErrorFile(defaultFile, ""),
+		Text: message.Text,
+	}
+
+	if message.Location != nil {
+		item.File = normalizeTransformErrorFile(defaultFile, message.Location.File)
+		item.Line = message.Location.Line
+		item.Column = message.Location.Column + 1
+	}
+
+	return item
+}
+
+func normalizeTransformErrorFile(defaultFile string, filename string) string {
+	if filename == "" {
+		filename = defaultFile
+	}
+
+	if application.App != nil {
+		root := application.App.Root()
+		if root != "" {
+			if rel, err := filepath.Rel(root, filename); err == nil && !strings.HasPrefix(rel, "..") {
+				filename = rel
+			}
+		}
+	}
+
+	return filepath.ToSlash(filename)
 }
 
 // Transform the javascript
