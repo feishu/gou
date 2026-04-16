@@ -15,7 +15,7 @@ func processScripts(process *process.Process) interface{} {
 
 	script, err := Select(process.ID)
 	if err != nil {
-		exception.New("scripts.%s not loaded", 404, process.ID).Throw()
+		exception.New("scripts.%s.%s not loaded: %s", 404, process.ID, process.Method, err).Throw()
 		return nil
 	}
 
@@ -27,7 +27,7 @@ func processStudio(process *process.Process) interface{} {
 
 	script, err := SelectRoot(process.ID)
 	if err != nil {
-		exception.New("studio.%s not loaded", 404, process.ID).Throw()
+		exception.New("studio.%s.%s not loaded: %s", 404, process.ID, process.Method, err).Throw()
 		return nil
 	}
 	return script.Exec(process)
