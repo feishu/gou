@@ -141,6 +141,13 @@ func TestOthers(t *testing.T) {
 	assert.Equal(t, 200, res.Code)
 	assert.Equal(t, nil, res.Data)
 
+	req = New(fmt.Sprintf("%s/put-binary", host)).SetHeader("Content-Type", "image/png")
+	res = req.Put([]byte{0x89, 0x50, 0x4e, 0x47})
+	data := any.Of(res.Data).MapStr().Dot()
+	assert.Equal(t, 200, res.Code)
+	assert.Equal(t, "image/png", data.Get("content_type"))
+	assert.Equal(t, float64(4), data.Get("size"))
+
 	req = New(fmt.Sprintf("%s/patch", host))
 	res = req.Patch(nil)
 	assert.Equal(t, 200, res.Code)
@@ -227,6 +234,7 @@ func start(t *testing.T, host *string, shutdown, ready chan bool) {
 	router.GET("/get", testGet)
 	router.POST("/post", testPost)
 	router.PUT("/put", func(c *gin.Context) { c.Status(200) })
+	router.PUT("/put-binary", testBinaryPut)
 	router.PATCH("/patch", func(c *gin.Context) { c.Status(200) })
 	router.DELETE("/delete", func(c *gin.Context) { c.Status(200) })
 	router.HEAD("/head", func(c *gin.Context) { c.Status(302) })
@@ -439,6 +447,20 @@ func testPost(c *gin.Context) {
 		}
 	}
 	c.JSON(200, gin.H{"payload": payload})
+	c.Done()
+}
+
+func testBinaryPut(c *gin.Context) {
+	data, err := ioutil.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(400, gin.H{"message": err.Error(), "code": 400})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"content_type": c.Request.Header.Get("Content-Type"),
+		"size":         len(data),
+	})
 	c.Done()
 }
 

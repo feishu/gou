@@ -437,6 +437,10 @@ func (r *Request) body() ([]byte, *Response) {
 		return body, nil
 	}
 
+	if data, ok := r.data.([]byte); ok {
+		return data, nil
+	}
+
 	if r.text() || r.xml() {
 		switch data := r.data.(type) {
 		case []byte:
