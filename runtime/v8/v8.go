@@ -10,8 +10,7 @@ var runtimeOption = &Option{}
 func Start(option *Option) error {
 	option.Validate()
 	runtimeOption = option
-	initialize()
-	return nil
+	return initialize()
 }
 
 // Stop v8 runtime

@@ -55,5 +55,7 @@ func prepare(t *testing.T, option *Option) {
 
 func prepareSetup(t *testing.T, option *Option) {
 	EnablePrecompile()
-	Start(option)
+	if err := Start(option); err != nil {
+		t.Fatal(err)
+	}
 }

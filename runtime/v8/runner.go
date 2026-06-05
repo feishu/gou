@@ -21,20 +21,22 @@ func (id ID) String() string {
 
 // Runner is the v8 runner
 type Runner struct {
-	id        ID
-	iso       *v8go.Isolate
-	ctx       *v8go.Context
-	tmpl      *v8go.ObjectTemplate
-	status    uint8
-	signal    chan uint8
-	chResp    chan interface{}
-	keepalive bool
-	script    *Script
-	method    string
-	sid       string
-	args      []interface{}
-	global    map[string]interface{}
-	caches    map[string]*v8go.Object
+	id         ID
+	iso        *v8go.Isolate
+	ctx        *v8go.Context
+	tmpl       *v8go.ObjectTemplate
+	status     uint8
+	dispatcher *Dispatcher
+	signal     chan uint8
+	destroyed  chan struct{}
+	chResp     chan interface{}
+	keepalive  bool
+	script     *Script
+	method     string
+	sid        string
+	args       []interface{}
+	global     map[string]interface{}
+	caches     map[string]*v8go.Object
 }
 
 const (
@@ -67,24 +69,27 @@ const (
 )
 
 // NewRunner create a new v8 runner
-func NewRunner(keepalive bool) *Runner {
+func NewRunner(keepalive bool, owner *Dispatcher) *Runner {
 	return &Runner{
-		id:        ID(uuid.New().String()),
-		iso:       nil,
-		ctx:       nil,
-		signal:    make(chan uint8, 2),
-		keepalive: keepalive,
-		status:    RunnerStatusInit,
+		id:         ID(uuid.New().String()),
+		iso:        nil,
+		ctx:        nil,
+		dispatcher: owner,
+		signal:     make(chan uint8, 2),
+		destroyed:  make(chan struct{}),
+		keepalive:  keepalive,
+		status:     RunnerStatusInit,
 	}
 }
 
 // Start start the v8 runner
-func (runner *Runner) Start(ready chan bool) error {
+func (runner *Runner) Start(ready chan error) error {
 
 	// Set the status to free
 	if runner.status != RunnerStatusInit {
 		err := fmt.Errorf("[runner] you can't start a runner with status: [%d]", runner.status)
 		log.Error(err.Error())
+		ready <- err
 		return err
 	}
 
@@ -95,13 +100,11 @@ func (runner *Runner) Start(ready chan bool) error {
 	runner.ctx = ctx
 	runner.tmpl = tmpl
 	runner.status = RunnerStatusReady
-	if runner.keepalive {
-		dispatcher.online(runner)
-	}
 
 	ticker := time.NewTicker(time.Millisecond * 50)
+	defer ticker.Stop()
 
-	ready <- true
+	ready <- nil
 
 	// Command loop
 	for {
@@ -135,6 +138,15 @@ func (runner *Runner) Start(ready chan bool) error {
 // Destroy send a destroy signal to the v8 runner
 func (runner *Runner) Destroy(cb func()) {
 	runner.signal <- RunnerCommandDestroy
+}
+
+func (runner *Runner) waitDestroyed(timeout time.Duration) bool {
+	select {
+	case <-runner.destroyed:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // Reset send a reset signal to the v8 runner
@@ -250,10 +262,13 @@ func (runner *Runner) destroy() {
 	log.Debug(fmt.Sprintf("4.  [%s] destroy the runner. status:%d, keepalive:%v ", runner.id, runner.status, runner.keepalive))
 	log.Debug(fmt.Sprintf("--- [%s] end -----------------", runner.id))
 
-	dispatcher.total--
+	runner.dispatcher.runnerDestroyed(true)
 	runner.status = RunnerStatusDestroy
 	if runner.signal != nil {
 		close(runner.signal)
+	}
+	if runner.destroyed != nil {
+		close(runner.destroyed)
 	}
 
 	runner.ctx.Close()
@@ -276,14 +291,14 @@ func (runner *Runner) reset() {
 	runner.ctx = v8go.NewContext(runner.iso, runner.tmpl)
 
 	if !runner.health() {
-		runner.signal <- RunnerCommandDestroy
-		dispatcher.create()
+		runner.dispatcher.healthEvictionCount()
+		runner.dispatcher.release(runner, false)
 		return
 	}
 
 	// Set the status to free
 	runner.status = RunnerStatusReady
-	dispatcher.online(runner)
+	runner.dispatcher.release(runner, true)
 
 }
 

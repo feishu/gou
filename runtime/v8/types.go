@@ -10,6 +10,24 @@ import (
 	"rogchap.com/v8go"
 )
 
+type dispatcherState uint8
+
+const (
+	dispatcherRunning dispatcherState = iota
+	dispatcherClosing
+	dispatcherClosed
+)
+
+type DispatcherStats struct {
+	Active          uint64
+	Idle            uint64
+	Leased          uint64
+	Created         uint64
+	Destroyed       uint64
+	Timeouts        uint64
+	HealthEvictions uint64
+}
+
 // var isoMaxSize = 10
 // var isoInitSize = 2
 // var isoHeapSizeLimit uint64 = 1518338048 // 1.5G

@@ -29,7 +29,7 @@ var isoReady chan *store.Isolate
 
 // initialize create a new Isolate
 // in performance mode, the minSize isolates will be created
-func initialize() {
+func initialize() error {
 
 	log.Info("[V8] initialize mode: %s", runtimeOption.Mode)
 	v8go.YaoInit(uint(runtimeOption.HeapSizeLimit / 1024 / 1024))
@@ -37,13 +37,13 @@ func initialize() {
 	// Performance mode
 	if runtimeOption.Mode == "performance" {
 		dispatcher = NewDispatcher(runtimeOption.MinSize, runtimeOption.MaxSize)
-		dispatcher.Start()
-		return
+		return dispatcher.Start()
 	}
 
 	// Standard mode
 	makeGlobalIsolate()
 	isoReady = make(chan *store.Isolate, runtimeOption.MinSize)
+	return nil
 
 }
 
