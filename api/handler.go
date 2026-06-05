@@ -150,7 +150,7 @@ func (path Path) streamHandler(getArgs argsHandler) func(c *gin.Context) {
 
 		chanStream := make(chan ssEventData, 1)
 		chanError := make(chan error, 1)
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(c.Request.Context())
 		defer cancel()
 
 		wg := &sync.WaitGroup{}
@@ -165,7 +165,11 @@ func (path Path) streamHandler(getArgs argsHandler) func(c *gin.Context) {
 			path.runStreamScript(ctx, c, getArgs,
 				// event
 				func(name string, message interface{}) {
-					chanStream <- ssEventData{Name: name, Message: message}
+					select {
+					case chanStream <- ssEventData{Name: name, Message: message}:
+					case <-ctx.Done():
+						return
+					}
 				},
 
 				// cancel
@@ -173,7 +177,11 @@ func (path Path) streamHandler(getArgs argsHandler) func(c *gin.Context) {
 
 				// error
 				func(err error) {
-					chanError <- err
+					select {
+					case chanError <- err:
+					case <-ctx.Done():
+						return
+					}
 				},
 			)
 		}()
@@ -193,6 +201,10 @@ func (path Path) streamHandler(getArgs argsHandler) func(c *gin.Context) {
 				return true
 
 			case <-ctx.Done():
+				return false
+
+			case <-c.Request.Context().Done():
+				cancel()
 				return false
 			}
 		})
