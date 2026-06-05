@@ -162,52 +162,46 @@ func (context *Context) CallWith(ctx context.Context, method string, args ...int
 	}
 	defer bridge.FreeJsValues(jsArgs)
 
-	doneChan := make(chan bool, 1)
+	doneChan := make(chan struct{})
 	resChan := make(chan interface{}, 1)
 	errChan := make(chan error, 1)
 
 	go func() {
+		defer close(doneChan)
 
-		defer func() {
-			close(resChan)
-			close(errChan)
-		}()
-
-		select {
-		case <-doneChan:
+		jsRes, err := global.MethodCall(method, bridge.Valuers(jsArgs)...)
+		if err != nil {
+			if e, ok := err.(*v8go.JSError); ok {
+				PrintException(method, args, e, context.SourceRoots)
+			}
+			errChan <- err
 			return
-
-		default:
-
-			jsRes, err := global.MethodCall(method, bridge.Valuers(jsArgs)...)
-			if err != nil {
-				if e, ok := err.(*v8go.JSError); ok {
-					PrintException(method, args, e, context.SourceRoots)
-				}
-				errChan <- err
-				return
-			}
-
-			goRes, err := bridge.GoValue(jsRes, context.Context)
-			if err != nil {
-				errChan <- err
-				return
-			}
-
-			resChan <- goRes
 		}
+
+		goRes, err := bridge.GoValue(jsRes, context.Context)
+		if err != nil {
+			errChan <- err
+			return
+		}
+
+		resChan <- goRes
 	}()
 
 	select {
 	case <-ctx.Done():
-		doneChan <- true
+		if context.Isolate != nil {
+			context.Isolate.TerminateExecution()
+		}
+		<-doneChan
 		return nil, ctx.Err()
 
 	case err := <-errChan:
+		<-doneChan
 		log.Error("%s.%s %v", context.ID, method, err)
 		return nil, err
 
 	case goRes := <-resChan:
+		<-doneChan
 		return goRes, nil
 	}
 }
