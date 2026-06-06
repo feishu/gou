@@ -10,8 +10,9 @@ func cleanupDispatcherForTest(t *testing.T) {
 	t.Helper()
 
 	if dispatcher != nil {
-		destroyIdleDispatcherRunners()
+		Stop()
 		waitForDispatcherTotal(t, 0)
+		return
 	}
 	Stop()
 }
@@ -51,6 +52,22 @@ func waitForDispatcherTotal(t *testing.T, expected uint) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Errorf("expected dispatcher total %d, got %d", expected, dispatcher.Stats().Active)
+}
+
+func waitForDispatcherStats(t *testing.T, match func(DispatcherStats) bool) DispatcherStats {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		stats := dispatcher.Stats()
+		if match(stats) {
+			return stats
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stats := dispatcher.Stats()
+	t.Fatalf("dispatcher stats did not reach expected state: %+v", stats)
+	return stats
 }
 
 func TestDispatcherStartPrewarmsMinRunners(t *testing.T) {
@@ -222,5 +239,53 @@ func TestDispatcherStopRejectsNewSelect(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("expected Select to fail after Stop")
+	}
+}
+
+func TestRunnerResetEvictsUnhealthyRunner(t *testing.T) {
+	option := option()
+	option.Mode = "performance"
+	option.MinSize = 1
+	option.MaxSize = 1
+	option.DefaultTimeout = 500
+	option.HeapSizeLimit = 4294967296
+
+	prepareSetup(t, option)
+	defer cleanupDispatcherForTest(t)
+
+	originalHealthChecker := runnerHealthChecker
+	runnerHealthChecker = func(*Runner) bool { return false }
+	defer func() { runnerHealthChecker = originalHealthChecker }()
+
+	runner, err := dispatcher.Select(100 * time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldID := runner.id
+
+	runner.Reset()
+	if !runner.waitDestroyed(time.Second) {
+		t.Fatal("unhealthy runner was not destroyed")
+	}
+
+	stats := waitForDispatcherStats(t, func(stats DispatcherStats) bool {
+		return stats.HealthEvictions == 1 && stats.Destroyed == 1 && stats.Active == 0
+	})
+	if stats.Idle != 0 {
+		t.Fatalf("expected no idle runner after eviction, got %d", stats.Idle)
+	}
+
+	runnerHealthChecker = originalHealthChecker
+	replacement, err := dispatcher.Select(500 * time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destroyLeasedDispatcherRunners([]*Runner{replacement})
+
+	if replacement.id == oldID {
+		t.Fatal("expected unhealthy runner to be replaced")
+	}
+	if active := dispatcher.Stats().Active; active > uint64(option.MaxSize) {
+		t.Fatalf("created %d runners, max is %d", active, option.MaxSize)
 	}
 }

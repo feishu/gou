@@ -21,8 +21,9 @@ type IStore interface {
 // Isolate v8 Isolate
 type Isolate struct {
 	*v8go.Isolate
-	Status   uint8
-	Template *v8go.ObjectTemplate
+	Status    uint8
+	Template  *v8go.ObjectTemplate
+	OnDispose func(*Isolate)
 }
 
 // Context runtime context

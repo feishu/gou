@@ -28,6 +28,12 @@ type DispatcherStats struct {
 	HealthEvictions uint64
 }
 
+type StandardCompatStats struct {
+	Created uint64
+	Active  uint64
+	Idle    uint64
+}
+
 // var isoMaxSize = 10
 // var isoInitSize = 2
 // var isoHeapSizeLimit uint64 = 1518338048 // 1.5G
@@ -49,11 +55,19 @@ type Option struct {
 	TSConfig          *TSConfig `json:"tsconfig,omitempty"`          // the TypeScript config
 	Debug             bool      `json:"debug,omitempty"`             // if true, the debug mode will be enabled, default value is false
 	ConsoleMode       string    `json:"consoleMode,omitempty"`       // the console mode, default value is "production", the other value is "development"
+	Inspect           Inspect   `json:"inspect,omitempty"`           // V8 inspector debug option
 
 	// The following options are experimental features and not stable.
 	// They may be removed once the features become stable. Please do not use them in a production environment.
 	Import bool `json:"import,omitempty"` // Always true, do not change it.
 
+}
+
+// Inspect V8 inspector debug option
+type Inspect struct {
+	Enabled bool   `json:"enabled,omitempty"`
+	Host    string `json:"host,omitempty"`
+	Port    int    `json:"port,omitempty"`
 }
 
 // TSConfig TypeScript config
@@ -77,6 +91,14 @@ type Script struct {
 	Root        bool
 	SourceRoots interface{} // the script source root mappping
 	Timeout     time.Duration
+}
+
+type runnerInvocation struct {
+	script *Script
+	method string
+	args   []interface{}
+	sid    string
+	global map[string]interface{}
 }
 
 // Module the module
@@ -146,12 +168,16 @@ type Isolates struct {
 
 // Context v8 Context
 type Context struct {
+	mu          sync.Mutex
+	closed      bool
 	ID          string                 // the script id
 	Sid         string                 // set the session id
 	Data        map[string]interface{} // set the global data
 	Root        bool
 	Timeout     time.Duration // terminate the execution after this time
 	SourceRoots interface{}   // the script source root mappping
+	script      *Script
+	runnerUsed  bool
 	*Runner
 	*store.Isolate
 	*v8go.UnboundScript

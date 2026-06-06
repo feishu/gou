@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/google/uuid"
@@ -20,8 +21,8 @@ var reFuncHead = regexp.MustCompile(`\s*function\s+(\w+)\s*\(([^)]*)\)\s*\{`)
 func (context *Context) Call(method string, args ...interface{}) (interface{}, error) {
 
 	// Performance Mode
-	if context.Runner != nil {
-		return context.Runner.Exec(context.script), nil
+	if runner, inv := context.runnerInvocation(method, args); runner != nil {
+		return runnerCallResult(runner.ExecInvocation(inv))
 	}
 
 	// Set the global data
@@ -72,7 +73,8 @@ func (context *Context) CallAnonymous(source string, args ...interface{}) (inter
 	source = reFuncHead.ReplaceAllString(source, "")
 	name := fmt.Sprintf("__anonymous_%s", uuid.New().String())
 
-	script, err := context.Isolate.CompileUnboundScript(source, name, v8go.CompileOptions{})
+	iso := context.v8Isolate()
+	script, err := iso.CompileUnboundScript(source, name, v8go.CompileOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +102,8 @@ func (context *Context) CallAnonymousWith(ctx context.Context, source string, ar
 	source = reFuncHead.ReplaceAllString(source, "($2) => {")
 	name := fmt.Sprintf("__anonymous_%s", uuid.New().String())
 
-	script, err := context.Isolate.CompileUnboundScript(source, name, v8go.CompileOptions{})
+	iso := context.v8Isolate()
+	script, err := iso.CompileUnboundScript(source, name, v8go.CompileOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -134,8 +137,23 @@ func (context *Context) CallAnonymousWith(ctx context.Context, source string, ar
 func (context *Context) CallWith(ctx context.Context, method string, args ...interface{}) (interface{}, error) {
 
 	// Performance Mode
-	if context.Runner != nil {
-		return context.Runner.Exec(context.script), nil
+	if runner, inv := context.runnerInvocation(method, args); runner != nil {
+		done := make(chan interface{}, 1)
+		go func() {
+			done <- runner.ExecInvocation(inv)
+		}()
+
+		select {
+		case res := <-done:
+			return runnerCallResult(res)
+
+		case <-ctx.Done():
+			runner.Destroy(nil)
+			runner.terminateExecution()
+			<-done
+			runner.waitDestroyed(time.Second)
+			return nil, ctx.Err()
+		}
 	}
 
 	// Set the global data
@@ -189,8 +207,8 @@ func (context *Context) CallWith(ctx context.Context, method string, args ...int
 
 	select {
 	case <-ctx.Done():
-		if context.Isolate != nil {
-			context.Isolate.TerminateExecution()
+		if iso := context.v8Isolate(); iso != nil {
+			iso.TerminateExecution()
 		}
 		<-doneChan
 		return nil, ctx.Err()
@@ -208,7 +226,7 @@ func (context *Context) CallWith(ctx context.Context, method string, args ...int
 
 // WithFunction add a function to the context
 func (context *Context) WithFunction(name string, cb v8go.FunctionCallback) {
-	tmpl := v8go.NewFunctionTemplate(context.Isolate.Isolate, cb)
+	tmpl := v8go.NewFunctionTemplate(context.v8Isolate(), cb)
 	context.Global().Set(name, tmpl.GetFunction(context.Context))
 }
 
@@ -229,27 +247,77 @@ func (context *Context) WithGlobal(name string, value interface{}) error {
 
 // Close Context
 func (context *Context) Close() error {
-
-	// Standard Mode Release Isolate
-	if runtimeOption.Mode == "standard" {
-		context.Context.Close()
-		context.Context = nil
-		context.UnboundScript = nil
-		context.Data = nil
-
-		context.Isolate.Dispose()
-		context.Isolate = nil
+	if context == nil {
 		return nil
 	}
 
-	// Performance Mode Release Runner
-	if context.Runner != nil {
-		context.Runner.Reset()
-		context.Context = nil
-		context.Data = nil
-		context.Runner = nil
+	context.mu.Lock()
+	if context.closed {
+		context.mu.Unlock()
+		return nil
+	}
+	context.closed = true
+	runner := context.Runner
+	runnerUsed := context.runnerUsed
+	v8ctx := context.Context
+	iso := context.Isolate
+	context.Context = nil
+	context.UnboundScript = nil
+	context.Data = nil
+	context.Runner = nil
+	context.Isolate = nil
+	context.mu.Unlock()
+
+	if runner != nil {
+		if !runnerUsed {
+			runner.Reset()
+		}
 		return nil
 	}
 
+	if v8ctx != nil {
+		v8ctx.Close()
+	}
+	if iso != nil {
+		iso.Dispose()
+	}
 	return nil
+}
+
+func (context *Context) runnerInvocation(method string, args []interface{}) (*Runner, runnerInvocation) {
+	context.mu.Lock()
+	defer context.mu.Unlock()
+
+	runner := context.Runner
+	if runner != nil {
+		context.runnerUsed = true
+	}
+	inv := runnerInvocation{
+		script: context.script,
+		method: method,
+		args:   args,
+		sid:    context.Sid,
+		global: context.Data,
+	}
+	return runner, inv
+}
+
+func (context *Context) v8Isolate() *v8go.Isolate {
+	if context == nil {
+		return nil
+	}
+	if context.Isolate != nil && context.Isolate.Isolate != nil {
+		return context.Isolate.Isolate
+	}
+	if context.Context != nil {
+		return context.Context.Isolate()
+	}
+	return nil
+}
+
+func runnerCallResult(res interface{}) (interface{}, error) {
+	if err, ok := res.(error); ok {
+		return nil, err
+	}
+	return res, nil
 }

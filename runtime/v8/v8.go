@@ -2,6 +2,7 @@ package v8
 
 import (
 	"github.com/yaoapp/gou/runtime/v8/store"
+	"rogchap.com/v8go"
 )
 
 var runtimeOption = &Option{}
@@ -15,15 +16,12 @@ func Start(option *Option) error {
 
 // Stop v8 runtime
 func Stop() {
-	if isoReady != nil {
-		close(isoReady)
-	}
-	isoReady = nil
+	release()
 	store.Isolates.Range(func(iso store.IStore) bool {
 		key := iso.Key()
 		store.CleanIsolateCache(key)
 		store.Isolates.Remove(key)
 		return true
 	})
-	release()
+	v8go.YaoDispose()
 }

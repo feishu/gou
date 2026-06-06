@@ -15,12 +15,26 @@ const (
 
 // Dispose the isolate
 func (iso *Isolate) Dispose() {
+	if iso == nil {
+		return
+	}
+	if iso.OnDispose != nil {
+		iso.OnDispose(iso)
+		return
+	}
+	iso.DisposeDirect()
+}
+
+// DisposeDirect releases the isolate without invoking compatibility callbacks.
+func (iso *Isolate) DisposeDirect() {
+	if iso == nil || iso.Isolate == nil {
+		return
+	}
 	// fmt.Printf("dispose isolate: %s\n", iso.Key())
 	Isolates.Remove(iso.Key()) // remove from normal isolates
 	iso.Isolate.Dispose()
 	iso.Isolate = nil
 	iso.Template = nil
-	iso = nil
 }
 
 // Key return the key of the isolate

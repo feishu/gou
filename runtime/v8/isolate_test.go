@@ -1,9 +1,11 @@
 package v8
 
 import (
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/yaoapp/gou/runtime/v8/store"
 	"github.com/yaoapp/kun/log"
 )
 
@@ -12,7 +14,7 @@ func TestSelectIsoStandard(t *testing.T) {
 	option.Mode = "standard"
 	option.HeapSizeLimit = 4294967296
 
-	prepare(t, option)
+	prepareSetup(t, option)
 	defer Stop()
 
 	iso, err := SelectIsoStandard(time.Millisecond * 100)
@@ -20,6 +22,61 @@ func TestSelectIsoStandard(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer iso.Dispose()
+}
+
+func TestSelectIsoStandardCompatibilityIsBounded(t *testing.T) {
+	option := option()
+	option.Mode = "standard"
+	option.MinSize = 1
+	option.MaxSize = 2
+	option.DefaultTimeout = 50
+	option.HeapSizeLimit = 4294967296
+
+	prepareSetup(t, option)
+	defer Stop()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 4)
+	isos := make(chan *store.Isolate, 4)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			iso, err := SelectIsoStandard(50 * time.Millisecond)
+			if err != nil {
+				errs <- err
+				return
+			}
+			isos <- iso
+		}()
+	}
+	wg.Wait()
+	close(isos)
+	close(errs)
+
+	successes := 0
+	for iso := range isos {
+		successes++
+		iso.Dispose()
+	}
+	failures := 0
+	for err := range errs {
+		failures++
+		if err == nil {
+			t.Fatal("unexpected nil error")
+		}
+	}
+	if successes > int(option.MaxSize) {
+		t.Fatalf("expected at most %d successful isolates, got %d", option.MaxSize, successes)
+	}
+	if successes+failures != 4 {
+		t.Fatalf("expected 4 completed calls, got successes=%d failures=%d", successes, failures)
+	}
+
+	stats := standardCompatStats()
+	if stats.Created > uint64(option.MaxSize) {
+		t.Fatalf("expected at most %d created isolates, got %d", option.MaxSize, stats.Created)
+	}
 }
 
 // go test -bench=BenchmarkSelectIsoStandard

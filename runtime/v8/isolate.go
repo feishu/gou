@@ -2,6 +2,7 @@ package v8
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	atobT "github.com/yaoapp/gou/runtime/v8/functions/atob"
@@ -25,7 +26,7 @@ import (
 	"rogchap.com/v8go"
 )
 
-var isoReady chan *store.Isolate
+var standardCompat = newStandardCompat()
 
 // initialize create a new Isolate
 // in performance mode, the minSize isolates will be created
@@ -34,24 +35,29 @@ func initialize() error {
 	log.Info("[V8] initialize mode: %s", runtimeOption.Mode)
 	v8go.YaoInit(uint(runtimeOption.HeapSizeLimit / 1024 / 1024))
 
-	// Performance mode
-	if runtimeOption.Mode == "performance" {
-		dispatcher = NewDispatcher(runtimeOption.MinSize, runtimeOption.MaxSize)
-		return dispatcher.Start()
+	if err := startDebug(runtimeOption.Inspect); err != nil {
+		v8go.YaoDispose()
+		return err
 	}
 
-	// Standard mode
-	makeGlobalIsolate()
-	isoReady = make(chan *store.Isolate, runtimeOption.MinSize)
+	dispatcher = NewDispatcher(runtimeOption.MinSize, runtimeOption.MaxSize)
+	if err := dispatcher.Start(); err != nil {
+		stopDebug()
+		v8go.YaoDispose()
+		return err
+	}
+
+	standardCompat.reset(runtimeOption.MaxSize)
 	return nil
 
 }
 
 func release() {
-	v8go.YaoDispose()
-	if runtimeOption.Mode == "performance" {
+	stopDebug()
+	if dispatcher != nil {
 		dispatcher.Stop()
 	}
+	standardCompat.stop()
 }
 
 // precompile compile the loaded scirpts
@@ -113,23 +119,124 @@ func makeIsolate() *store.Isolate {
 
 // SelectIsoStandard one ready isolate ( the max size is 2 )
 func SelectIsoStandard(timeout time.Duration) (*store.Isolate, error) {
-
-	go func() {
-		// Create a new isolate
-		iso := makeIsolate()
-		isoReady <- iso
-	}()
-
-	// make a timer
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	select {
-	case <-timer.C:
+	iso, err := standardCompat.selectIsolate(timeout)
+	if err != nil {
 		log.Error("[V8] Select isolate timeout %v", timeout)
-		return nil, fmt.Errorf("Select isolate timeout %v", timeout)
+		return nil, err
+	}
+	return iso, nil
+}
 
-	case iso := <-isoReady:
-		return iso, nil
+func standardCompatStats() StandardCompatStats {
+	return standardCompat.stats()
+}
+
+type standardCompatStore struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	idle    []*store.Isolate
+	max     uint
+	total   uint
+	created uint64
+	closed  bool
+}
+
+func newStandardCompat() *standardCompatStore {
+	compat := &standardCompatStore{}
+	compat.cond = sync.NewCond(&compat.mu)
+	return compat
+}
+
+func (compat *standardCompatStore) reset(max uint) {
+	compat.mu.Lock()
+	compat.idle = nil
+	compat.max = max
+	compat.total = 0
+	compat.created = 0
+	compat.closed = false
+	compat.mu.Unlock()
+	compat.cond.Broadcast()
+}
+
+func (compat *standardCompatStore) selectIsolate(timeout time.Duration) (*store.Isolate, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		compat.mu.Lock()
+		if compat.closed {
+			compat.mu.Unlock()
+			return nil, fmt.Errorf("Select isolate closed")
+		}
+		if len(compat.idle) > 0 {
+			last := len(compat.idle) - 1
+			iso := compat.idle[last]
+			compat.idle = compat.idle[:last]
+			iso.Lock()
+			compat.mu.Unlock()
+			return iso, nil
+		}
+		if compat.total < compat.max {
+			compat.total++
+			compat.created++
+			compat.mu.Unlock()
+
+			iso := makeIsolate()
+			iso.Lock()
+			iso.OnDispose = compat.releaseIsolate
+			return iso, nil
+		}
+		compat.mu.Unlock()
+
+		if time.Until(deadline) <= 0 {
+			return nil, fmt.Errorf("Select isolate timeout %v", timeout)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func (compat *standardCompatStore) releaseIsolate(iso *store.Isolate) {
+	if iso == nil {
+		return
+	}
+
+	compat.mu.Lock()
+	if compat.closed || iso.Isolate == nil {
+		if compat.total > 0 {
+			compat.total--
+		}
+		compat.mu.Unlock()
+		compat.cond.Broadcast()
+		iso.OnDispose = nil
+		iso.DisposeDirect()
+		return
+	}
+
+	iso.Unlock()
+	compat.idle = append(compat.idle, iso)
+	compat.mu.Unlock()
+	compat.cond.Broadcast()
+}
+
+func (compat *standardCompatStore) stop() {
+	compat.mu.Lock()
+	compat.closed = true
+	idle := compat.idle
+	compat.idle = nil
+	compat.total = 0
+	compat.mu.Unlock()
+	compat.cond.Broadcast()
+
+	for _, iso := range idle {
+		iso.OnDispose = nil
+		iso.DisposeDirect()
+	}
+}
+
+func (compat *standardCompatStore) stats() StandardCompatStats {
+	compat.mu.Lock()
+	defer compat.mu.Unlock()
+	return StandardCompatStats{
+		Created: compat.created,
+		Active:  uint64(compat.total),
+		Idle:    uint64(len(compat.idle)),
 	}
 }
