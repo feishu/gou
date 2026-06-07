@@ -1,7 +1,6 @@
 package v8
 
 import (
-	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
@@ -9,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,32 +16,31 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/yaoapp/gou/application"
 	"github.com/yaoapp/kun/log"
 	v8go "rogchap.com/v8go"
 )
 
 type debugManager struct {
-	mu            sync.Mutex
-	enabled       bool
-	host          string
-	port          int
-	server        *http.Server
-	runtimeTarget *debugTarget
-	targets       map[string]*debugTarget
-	byScript      map[string]*debugTarget
+	mu                       sync.Mutex
+	enabled                  bool
+	host                     string
+	port                     int
+	server                   *http.Server
+	registry                 *debugRegistry
+	beforeDebugServerPublish func()
 }
 
 type debugTarget struct {
-	mu                sync.Mutex
-	id                string
-	groupID           int
-	script            *Script
-	session           *debugSession
-	manager           *debugManager
-	flatSourceMapOnce sync.Once
-	flatSourceMap     *SourceMap
+	mu                   sync.Mutex
+	id                   string
+	groupID              int
+	script               *Script
+	session              *debugSession
+	registry             *debugRegistry
+	flatSourceMapOnce    sync.Once
+	flatSourceMap        *SourceMap
+	beforeSessionPublish func()
 }
 
 var cdpLogFile *os.File
@@ -76,15 +73,9 @@ const debugRuntimeTargetID = "runtime"
 var v8Debug = newDebugManager()
 
 func newDebugManager() *debugManager {
-	manager := &debugManager{
-		targets:  map[string]*debugTarget{},
-		byScript: map[string]*debugTarget{},
-	}
-	manager.runtimeTarget = &debugTarget{
-		id:      debugRuntimeTargetID,
-		groupID: debugContextGroupID(debugRuntimeTargetID),
-		manager: manager,
-	}
+	manager := &debugManager{}
+	manager.registry = newDebugRegistry("127.0.0.1", 9229)
+	manager.registry.manager = manager
 	return manager
 }
 
@@ -115,11 +106,12 @@ func (manager *debugManager) start(inspect Inspect) error {
 		manager.mu.Unlock()
 		return nil
 	}
+	registry := newDebugRegistry(host, port)
 	manager.enabled = true
 	manager.host = host
 	manager.port = port
-	manager.targets = map[string]*debugTarget{}
-	manager.byScript = map[string]*debugTarget{}
+	manager.registry = registry
+	manager.registry.manager = manager
 	manager.mu.Unlock()
 
 	mux := http.NewServeMux()
@@ -133,8 +125,19 @@ func (manager *debugManager) start(inspect Inspect) error {
 	listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		manager.mu.Lock()
-		manager.enabled = false
+		var targets []*debugTarget
+		var runtimeTarget *debugTarget
+		if manager.registry == registry {
+			targets, runtimeTarget = registry.deactivateAndSnapshot()
+			manager.enabled = false
+		}
 		manager.mu.Unlock()
+		if runtimeTarget != nil {
+			runtimeTarget.closeSession()
+		}
+		for _, target := range targets {
+			target.closeSession()
+		}
 		return err
 	}
 
@@ -145,6 +148,25 @@ func (manager *debugManager) start(inspect Inspect) error {
 	}
 
 	manager.mu.Lock()
+	beforeDebugServerPublish := manager.beforeDebugServerPublish
+	manager.mu.Unlock()
+	if beforeDebugServerPublish != nil {
+		beforeDebugServerPublish()
+	}
+
+	manager.mu.Lock()
+	if manager.registry != registry || !manager.enabled {
+		targets, runtimeTarget := registry.deactivateAndSnapshot()
+		manager.mu.Unlock()
+		_ = listener.Close()
+		if runtimeTarget != nil {
+			runtimeTarget.closeSession()
+		}
+		for _, target := range targets {
+			target.closeSession()
+		}
+		return nil
+	}
 	manager.server = server
 	manager.mu.Unlock()
 
@@ -161,15 +183,12 @@ func (manager *debugManager) start(inspect Inspect) error {
 func (manager *debugManager) stop() {
 	manager.mu.Lock()
 	server := manager.server
-	targets := make([]*debugTarget, 0, len(manager.targets))
-	for _, target := range manager.targets {
-		targets = append(targets, target)
-	}
-	runtimeTarget := manager.runtimeTarget
+	registry := manager.registry
+	targets, runtimeTarget := registry.deactivateAndSnapshot()
 	manager.server = nil
 	manager.enabled = false
-	manager.targets = map[string]*debugTarget{}
-	manager.byScript = map[string]*debugTarget{}
+	manager.registry = newDebugRegistry(manager.host, manager.port)
+	manager.registry.manager = manager
 	manager.mu.Unlock()
 
 	if runtimeTarget != nil {
@@ -189,11 +208,24 @@ func (manager *debugManager) isEnabled() bool {
 	return manager.enabled
 }
 
+func (manager *debugManager) activeRegistry() *debugRegistry {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if !manager.enabled {
+		return nil
+	}
+	return manager.registry
+}
+
 func (manager *debugManager) registerScript(script *Script) {
-	if script == nil || !manager.isEnabled() {
+	if script == nil {
 		return
 	}
-	manager.ensureTarget(script)
+	registry := manager.activeRegistry()
+	if registry == nil {
+		return
+	}
+	registry.registerScript(script)
 }
 
 func (manager *debugManager) ensureTarget(script *Script) *debugTarget {
@@ -201,55 +233,35 @@ func (manager *debugManager) ensureTarget(script *Script) *debugTarget {
 		return nil
 	}
 
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	if !manager.enabled {
+	registry := manager.activeRegistry()
+	if registry == nil {
 		return nil
 	}
-	if target := manager.byScript[script.ID]; target != nil {
-		target.script = script
-		return target
-	}
-
-	id := debugTargetID(script.ID)
-	target := &debugTarget{
-		id:      id,
-		groupID: debugContextGroupID(id),
-		script:  script,
-		manager: manager,
-	}
-	manager.targets[id] = target
-	manager.byScript[script.ID] = target
-	return target
+	return registry.registerScript(script)
 }
 
 func (manager *debugManager) targetForScript(script *Script) *debugTarget {
-	if script == nil || !manager.isEnabled() {
+	if script == nil {
 		return nil
 	}
-	return manager.ensureTarget(script)
+
+	registry := manager.activeRegistry()
+	if registry == nil {
+		return nil
+	}
+	return registry.targetForScript(script)
 }
 
 func (manager *debugManager) sessionTargetForScript(script *Script) *debugTarget {
-	if script == nil || !manager.isEnabled() {
+	if script == nil {
 		return nil
 	}
 
-	scriptTarget := manager.ensureTarget(script)
-	if scriptTarget != nil && scriptTarget.currentSession() != nil {
-		return scriptTarget
+	registry := manager.activeRegistry()
+	if registry == nil {
+		return nil
 	}
-
-	manager.mu.Lock()
-	runtimeTarget := manager.runtimeTarget
-	manager.mu.Unlock()
-	if runtimeTarget != nil {
-		session := runtimeTarget.currentSession()
-		if session != nil && session.shouldAttachScript(script) {
-			return runtimeTarget
-		}
-	}
-	return scriptTarget
+	return registry.sessionTargetForScript(script)
 }
 
 func (session *debugSession) hasBreakpointForTarget(target *debugTarget) bool {
@@ -269,8 +281,8 @@ func (session *debugSession) hasBreakpointForTarget(target *debugTarget) bool {
 		}
 
 		hasURLBreakpoint = true
-		if intent.URL != "" && target.manager != nil {
-			exactTarget := target.manager.targetForBreakpointURL(intent.URL)
+		if intent.URL != "" && target.registry != nil {
+			exactTarget := target.registry.targetForBreakpointURL(intent.URL)
 			if exactTarget != nil {
 				if exactTarget == target {
 					return true
@@ -286,70 +298,28 @@ func (session *debugSession) hasBreakpointForTarget(target *debugTarget) bool {
 	return !hasURLBreakpoint
 }
 
-func (manager *debugManager) targetForBreakpointURL(cdpURL string) *debugTarget {
-	manager.mu.Lock()
-	targets := make([]*debugTarget, 0, len(manager.targets))
-	for _, target := range manager.targets {
-		targets = append(targets, target)
-	}
-	manager.mu.Unlock()
-
-	for _, target := range targets {
-		if debugSourceMatchesURL(debugScriptURL(target.script), cdpURL) {
-			return target
-		}
-	}
-	return nil
-}
-
 func (manager *debugManager) findTarget(id string) *debugTarget {
-	if id == debugRuntimeTargetID {
-		manager.mu.Lock()
-		defer manager.mu.Unlock()
-		return manager.runtimeTarget
+	registry := manager.activeRegistry()
+	if registry == nil {
+		return nil
 	}
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	return manager.targets[id]
-}
-
-func (manager *debugManager) refreshTargets() {
-	if !manager.isEnabled() {
-		return
-	}
-
-	syncLock.Lock()
-	defer syncLock.Unlock()
-	for _, script := range Scripts {
-		manager.ensureTarget(script)
-	}
-	for _, script := range RootScripts {
-		manager.ensureTarget(script)
-	}
+	return registry.findTarget(id)
 }
 
 func (manager *debugManager) descriptors(r *http.Request) []debugTargetDescriptor {
-	manager.refreshTargets()
-
-	manager.mu.Lock()
-	targets := make([]*debugTarget, 0, len(manager.targets))
-	for _, target := range manager.targets {
-		targets = append(targets, target)
+	registry := manager.activeRegistry()
+	if registry == nil {
+		return nil
 	}
-	manager.mu.Unlock()
-
-	descriptors := make([]debugTargetDescriptor, 0, len(targets))
-	for _, target := range targets {
-		descriptors = append(descriptors, target.descriptor(r))
-	}
-	return descriptors
+	return registry.descriptors(r)
 }
 
 func (manager *debugManager) runtimeDescriptor(r *http.Request) debugTargetDescriptor {
-	manager.mu.Lock()
-	target := manager.runtimeTarget
-	manager.mu.Unlock()
-	return target.descriptor(r)
+	registry := manager.activeRegistry()
+	if registry == nil {
+		return debugTargetDescriptor{}
+	}
+	return registry.runtimeDescriptor(r)
 }
 
 func (manager *debugManager) handleVersion(w http.ResponseWriter, _ *http.Request) {
@@ -492,153 +462,6 @@ func (manager *debugManager) handleSourceMap(w http.ResponseWriter, r *http.Requ
 	_, _ = w.Write(data)
 }
 
-func (target *debugTarget) descriptor(r *http.Request) debugTargetDescriptor {
-	title := "Yao Runtime"
-	description := "Yao v8go JavaScript runtime"
-	targetURL := "yao://runtime"
-	if target.script != nil {
-		title = target.script.ID
-		if target.script.File != "" {
-			title = target.script.File
-		}
-		description = "Yao v8go JavaScript"
-		targetURL = target.scriptURL()
-	}
-	wsURL := fmt.Sprintf("ws://%s/ws/%s", target.host(r), target.id)
-	return debugTargetDescriptor{
-		ID:                   target.id,
-		Type:                 "node",
-		Title:                title,
-		Description:          description,
-		URL:                  targetURL,
-		DevtoolsFrontendURL:  fmt.Sprintf("devtools://devtools/bundled/js_app.html?ws=%s/ws/%s", target.host(r), target.id),
-		WebSocketDebuggerURL: wsURL,
-	}
-}
-
-func (target *debugTarget) scriptSource() string {
-	source := target.script.Source
-	if _, has := SourceMaps[target.script.File]; !has {
-		return source
-	}
-	return strings.TrimRight(source, "\n") + "\n//# sourceMappingURL=" + target.sourceMapURL(nil)
-}
-
-func (target *debugTarget) sourceMapURL(r *http.Request) string {
-	return fmt.Sprintf("http://%s/source-map/%s", target.host(r), target.id)
-}
-
-func (target *debugTarget) scriptURL() string {
-	if target == nil {
-		return ""
-	}
-	return debugScriptURL(target.script)
-}
-
-func debugScriptURL(script *Script) string {
-	if script == nil || script.File == "" {
-		return ""
-	}
-
-	file := filepath.Clean(filepath.FromSlash(script.File))
-	if !filepath.IsAbs(file) && application.App != nil && application.App.Root() != "" {
-		file = filepath.Join(application.App.Root(), file)
-	}
-	if filepath.IsAbs(file) {
-		return (&url.URL{Scheme: "file", Path: file}).String()
-	}
-	return script.File
-}
-
-// getFlatSourceMap 返回缓存的扁平 source map，用于断点反向映射。
-func (target *debugTarget) getFlatSourceMap() *SourceMap {
-	if target.flatSourceMap != nil {
-		return target.flatSourceMap
-	}
-	if target.script == nil {
-		return nil
-	}
-	target.flatSourceMapOnce.Do(func() {
-		sm, err := debugFlatSourceMap(target.script)
-		if err == nil {
-			target.flatSourceMap = sm
-		}
-	})
-	return target.flatSourceMap
-}
-
-// interceptBreakpointByUrl 拦截 VSCode 发送的 Debugger.setBreakpointByUrl 消息，
-// 通过 source map 将源文件行号反向映射为编译后行号。
-// VSCode js-debug 发送源行号并期望 V8 内部通过 source map 解析，但 v8go 的
-// V8 inspector 未加载 source map，所以必须在 proxy层完成反向映射。
-func (target *debugTarget) interceptBreakpointByUrl(message []byte) []byte {
-	if !bytes.Contains(message, []byte("setBreakpointByUrl")) {
-		return message
-	}
-
-	var msg map[string]interface{}
-	if err := jsoniter.Unmarshal(message, &msg); err != nil {
-		log.Error("[V8 Debug] Unmarshal setBreakpointByUrl failed: %s", err.Error())
-		return message
-	}
-
-	method, _ := msg["method"].(string)
-	if method != "Debugger.setBreakpointByUrl" {
-		return message
-	}
-
-	params, ok := msg["params"].(map[string]interface{})
-	if !ok {
-		log.Error("[V8 Debug] setBreakpointByUrl params is not map")
-		return message
-	}
-
-	lineNum, ok := debugNumberParam(params["lineNumber"])
-	if !ok {
-		return message
-	}
-	sourceLine := int(lineNum)
-
-	var cdpURL string
-	if value, ok := params["url"].(string); ok {
-		cdpURL = value
-	}
-	var urlRegex string
-	if value, ok := params["urlRegex"].(string); ok {
-		urlRegex = value
-	}
-
-	sm, sourceIdx := target.matchBreakpointSourceMap(cdpURL, urlRegex)
-	if sm == nil {
-		log.Warn("[V8 Debug] flat source map is nil for breakpoint. URL: %s, Regex: %s", cdpURL, urlRegex)
-		return message
-	}
-	if sourceIdx < 0 {
-		log.Warn("[V8 Debug] source not matched in source map. URL: %s, Regex: %s, Sources: %v", cdpURL, urlRegex, sm.Sources)
-		return message
-	}
-
-	// 反向映射：源行号 → 编译行号
-	genLine, found := reverseMapSourcePosition(sm, sourceIdx, sourceLine)
-	if !found {
-		log.Warn("[V8 Debug] breakpoint reverse-map not found: %s:%d (Line %d not mapped in source map)", sm.Sources[sourceIdx], sourceLine+1, sourceLine+1)
-		return message
-	}
-
-	log.Info("[V8 Debug] breakpoint reverse-map: %s:%d → compiled line %d",
-		filepath.Base(sm.Sources[sourceIdx]), sourceLine+1, genLine+1)
-
-	params["lineNumber"] = genLine
-	params["columnNumber"] = 0
-
-	modified, err := jsoniter.Marshal(msg)
-	if err != nil {
-		log.Error("[V8 Debug] Marshal modified breakpoint failed: %s", err.Error())
-		return message
-	}
-	return modified
-}
-
 func debugNumberParam(value interface{}) (float64, bool) {
 	switch v := value.(type) {
 	case float64:
@@ -657,89 +480,11 @@ func debugNumberParam(value interface{}) (float64, bool) {
 	}
 }
 
-func (target *debugTarget) matchBreakpointSourceMap(cdpURL string, urlRegex string) (*SourceMap, int) {
-	if target.script != nil {
-		return target.matchOwnBreakpointSourceMap(cdpURL, urlRegex)
-	}
-	if target.manager == nil {
-		return nil, -1
-	}
-	return target.manager.matchBreakpointSourceMap(cdpURL, urlRegex)
-}
-
-func (target *debugTarget) matchOwnBreakpointSourceMap(cdpURL string, urlRegex string) (*SourceMap, int) {
-	sm := target.getFlatSourceMap()
-	if sm == nil {
-		return nil, -1
-	}
-	sourceIdx := -1
-	if cdpURL != "" {
-		sourceIdx = matchSourceByURL(sm.Sources, cdpURL)
-	}
-	if sourceIdx < 0 && urlRegex != "" {
-		sourceIdx = matchSourceByRegex(sm.Sources, urlRegex)
-	}
-	return sm, sourceIdx
-}
-
-func (manager *debugManager) matchBreakpointSourceMap(cdpURL string, urlRegex string) (*SourceMap, int) {
-	manager.refreshTargets()
-
-	manager.mu.Lock()
-	targets := make([]*debugTarget, 0, len(manager.targets))
-	for _, target := range manager.targets {
-		targets = append(targets, target)
-	}
-	manager.mu.Unlock()
-
-	for _, target := range targets {
-		sm, sourceIdx := target.matchOwnBreakpointSourceMap(cdpURL, urlRegex)
-		if sm != nil && sourceIdx >= 0 {
-			return sm, sourceIdx
-		}
-	}
-	return nil, -1
-}
-
-func (target *debugTarget) host(r *http.Request) string {
-	if r != nil && r.Host != "" {
-		return r.Host
-	}
-	target.manager.mu.Lock()
-	defer target.manager.mu.Unlock()
-	return net.JoinHostPort(target.manager.host, strconv.Itoa(target.manager.port))
-}
-
 func (target *debugTarget) openSession() (*debugSession, error) {
-	target.mu.Lock()
-	oldSession := target.session
-	session := &debugSession{
-		id:                target.id,
-		target:            target,
-		outbound:          make(chan []byte, 256),
-		simulated:         make(map[int]bool),
-		breakpointIntents: make([]debugBreakpointIntent, 0),
-		nativeBreakpoints: make([][]byte, 0),
-		initializers:      make([][]byte, 0),
+	if target == nil || target.registry == nil {
+		return nil, fmt.Errorf("debug target is inactive")
 	}
-	session.breakpointRewrite = func(message []byte) debugBreakpointRewrite {
-		intent := parseDebugBreakpointIntent(message)
-		native := message
-		if target != nil {
-			native = target.interceptBreakpointByUrl(message)
-		}
-		return debugBreakpointRewrite{
-			Intent:        intent,
-			NativeMessage: append([]byte(nil), native...),
-		}
-	}
-	target.session = session
-	target.mu.Unlock()
-
-	if oldSession != nil {
-		_ = oldSession.Close()
-	}
-	return session, nil
+	return target.registry.openSession(target)
 }
 
 func (target *debugTarget) currentSession() *debugSession {

@@ -63,15 +63,18 @@ func (session *debugSession) shouldAttachScript(script *Script) bool {
 	if session == nil || script == nil {
 		return false
 	}
-	if session.target == nil || session.target.manager == nil {
+	if session.target == nil || session.target.registry == nil {
 		return true
 	}
 
-	target := session.target.manager.ensureTarget(script)
+	target := session.target.registry.registerScript(script)
 	if target == nil {
-		return true
+		return false
 	}
-	return session.hasBreakpointForTarget(target)
+	if !session.target.registry.isActive() {
+		return false
+	}
+	return session.hasBreakpointForTarget(target) && session.target.registry.isActive()
 }
 
 func (session *debugSession) Dispatch(message []byte) error {

@@ -3,6 +3,7 @@ package v8
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -83,6 +84,137 @@ func TestDebugListReturnsRuntimeTargetByDefault(t *testing.T) {
 	}
 	if target.WebSocketDebuggerURL != "ws://127.0.0.1:9229/ws/runtime" {
 		t.Fatalf("unexpected websocket debugger url: %s", target.WebSocketDebuggerURL)
+	}
+}
+
+func TestDebugManagerActiveRegistryReturnsNilWhenDisabled(t *testing.T) {
+	manager := newDebugManager()
+	manager.enabled = false
+
+	if registry := manager.activeRegistry(); registry != nil {
+		t.Fatalf("expected disabled manager to have no active registry, got %#v", registry)
+	}
+	if target := manager.ensureTarget(&Script{ID: "service.user", File: "scripts/service/user.ts"}); target != nil {
+		t.Fatalf("expected disabled manager not to register target, got %#v", target)
+	}
+	if len(manager.registry.scriptTargetsSnapshot()) != 0 {
+		t.Fatal("expected disabled manager registry to stay empty")
+	}
+}
+
+func TestDebugManagerFindTargetReturnsNilWhenDisabled(t *testing.T) {
+	manager := newDebugManager()
+	manager.enabled = false
+
+	if target := manager.findTarget(debugRuntimeTargetID); target != nil {
+		t.Fatalf("expected disabled manager not to find runtime target, got %#v", target)
+	}
+	if descriptor := manager.runtimeDescriptor(nil); descriptor.ID == debugRuntimeTargetID {
+		t.Fatalf("expected disabled manager not to publish runtime descriptor, got %+v", descriptor)
+	}
+	if descriptors := manager.descriptors(nil); len(descriptors) != 0 {
+		t.Fatalf("expected disabled manager not to publish script descriptors, got %+v", descriptors)
+	}
+}
+
+func TestDebugManagerStopDeactivatesStaleRegistry(t *testing.T) {
+	manager := newDebugManager()
+	manager.enabled = true
+	oldRegistry := manager.registry
+
+	manager.stop()
+
+	if target := oldRegistry.registerScript(&Script{ID: "service.user", File: "scripts/service/user.ts"}); target != nil {
+		t.Fatalf("expected stopped registry not to register target, got %#v", target)
+	}
+	if len(oldRegistry.scriptTargetsSnapshot()) != 0 {
+		t.Fatal("expected stopped registry to stay empty")
+	}
+}
+
+func TestDebugManagerStartListenFailureDeactivatesRegistry(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	manager := newDebugManager()
+	err = manager.start(Inspect{Enabled: true, Host: "127.0.0.1", Port: port})
+	if err == nil {
+		t.Fatal("expected listen failure")
+	}
+
+	failedRegistry := manager.registry
+	if target := failedRegistry.registerScript(&Script{ID: "service.user", File: "scripts/service/user.ts"}); target != nil {
+		t.Fatalf("expected failed-start registry not to register target, got %#v", target)
+	}
+	if len(failedRegistry.scriptTargetsSnapshot()) != 0 {
+		t.Fatal("expected failed-start registry to stay empty")
+	}
+}
+
+func TestDebugManagerStartStopBeforeServerPublishDoesNotLeakListener(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := newDebugManager()
+	t.Cleanup(manager.stop)
+
+	hookCalled := false
+	manager.beforeDebugServerPublish = func() {
+		hookCalled = true
+		manager.stop()
+	}
+
+	err = manager.start(Inspect{Enabled: true, Host: "127.0.0.1", Port: port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hookCalled {
+		t.Fatal("expected publish hook to run")
+	}
+
+	manager.mu.Lock()
+	server := manager.server
+	enabled := manager.enabled
+	manager.mu.Unlock()
+	if server != nil {
+		t.Fatal("expected stopped manager not to publish server")
+	}
+	if enabled {
+		t.Fatal("expected manager to stay disabled after stop in publish hook")
+	}
+
+	manager.beforeDebugServerPublish = nil
+	if err := manager.start(Inspect{Enabled: true, Host: "127.0.0.1", Port: port}); err != nil {
+		t.Fatalf("expected restart on same port after stopped start, got %v", err)
+	}
+}
+
+func TestDebugSessionShouldAttachScriptDoesNotRegisterAfterRegistryStopped(t *testing.T) {
+	manager := newDebugManager()
+	manager.enabled = true
+	oldRegistry := manager.registry
+	session, err := oldRegistry.runtimeTarget.openSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manager.stop()
+
+	if session.shouldAttachScript(&Script{ID: "service.user", File: "scripts/service/user.ts"}) {
+		t.Fatal("expected stopped session registry not to allow attach")
+	}
+	if len(oldRegistry.scriptTargetsSnapshot()) != 0 {
+		t.Fatal("expected stopped session registry to stay empty")
 	}
 }
 
@@ -306,10 +438,11 @@ export function Run() {
 }
 
 func TestDebugOpenSessionReplacesExistingSession(t *testing.T) {
+	registry := newDebugRegistry("127.0.0.1", 9229)
 	target := &debugTarget{
-		id:      "target",
-		script:  &Script{ID: "service.user", File: "scripts/service/user.ts"},
-		manager: newDebugManager(),
+		id:       "target",
+		script:   &Script{ID: "service.user", File: "scripts/service/user.ts"},
+		registry: registry,
 	}
 
 	first, err := target.openSession()
@@ -340,13 +473,52 @@ func TestDebugOpenSessionReplacesExistingSession(t *testing.T) {
 	}
 }
 
+func TestDebugTargetOpenSessionRejectsInactiveRegistry(t *testing.T) {
+	registry := newDebugRegistry("127.0.0.1", 9229)
+	target := registry.registerScript(&Script{ID: "service.user", File: "scripts/service/user.ts"})
+	registry.deactivateAndSnapshot()
+
+	session, err := target.openSession()
+	if err == nil {
+		_ = session.Close()
+		t.Fatal("expected inactive debug target to reject session")
+	}
+	if !strings.Contains(err.Error(), "debug target is inactive") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if target.currentSession() != nil {
+		t.Fatal("expected inactive debug target not to create session")
+	}
+}
+
+func TestDebugTargetOpenSessionRejectsDeactivateBeforePublish(t *testing.T) {
+	registry := newDebugRegistry("127.0.0.1", 9229)
+	target := registry.registerScript(&Script{ID: "service.user", File: "scripts/service/user.ts"})
+	target.beforeSessionPublish = func() {
+		registry.active = false
+	}
+
+	session, err := target.openSession()
+	if err == nil {
+		_ = session.Close()
+		t.Fatal("expected inactive debug target to reject session")
+	}
+	if !strings.Contains(err.Error(), "debug target is inactive") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if target.currentSession() != nil {
+		t.Fatal("expected inactive debug target not to publish session")
+	}
+}
+
 func TestDebugRuntimeSessionSelectedWithoutDebugTargetFile(t *testing.T) {
 	manager := newDebugManager()
 	manager.enabled = true
 	manager.host = "127.0.0.1"
 	manager.port = 9229
 
-	session, err := manager.runtimeTarget.openSession()
+	runtimeTarget := manager.registry.runtimeTarget
+	session, err := runtimeTarget.openSession()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +528,7 @@ func TestDebugRuntimeSessionSelectedWithoutDebugTargetFile(t *testing.T) {
 	})
 
 	script := &Script{ID: "service.user", File: "scripts/service/user.ts"}
-	if target := manager.sessionTargetForScript(script); target != manager.runtimeTarget {
+	if target := manager.sessionTargetForScript(script); target != runtimeTarget {
 		t.Fatalf("expected runtime target to be selected, got %#v", target)
 	}
 
@@ -364,7 +536,7 @@ func TestDebugRuntimeSessionSelectedWithoutDebugTargetFile(t *testing.T) {
 	if scriptTarget == nil {
 		t.Fatal("expected script target to still be registered for source maps")
 	}
-	if scriptTarget.id == manager.runtimeTarget.id {
+	if scriptTarget.id == runtimeTarget.id {
 		t.Fatal("script target must stay separate from runtime target")
 	}
 }
@@ -375,7 +547,8 @@ func TestDebugRuntimeSessionSkipsScriptsWithoutMatchingBreakpoints(t *testing.T)
 	manager.host = "127.0.0.1"
 	manager.port = 9229
 
-	session, err := manager.runtimeTarget.openSession()
+	runtimeTarget := manager.registry.runtimeTarget
+	session, err := runtimeTarget.openSession()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +571,7 @@ func TestDebugRuntimeSessionSkipsScriptsWithoutMatchingBreakpoints(t *testing.T)
 		},
 	}
 
-	if target := manager.sessionTargetForScript(schedule); target != manager.runtimeTarget {
+	if target := manager.sessionTargetForScript(schedule); target != runtimeTarget {
 		t.Fatalf("expected matching script to use runtime target, got %#v", target)
 	}
 	if target := manager.sessionTargetForScript(delayed); target != delayedTarget {
@@ -488,7 +661,8 @@ func TestDebugAttachNativeReplacesNonMatchingRunnerForBreakpointScript(t *testin
 	manager.host = "127.0.0.1"
 	manager.port = 9229
 
-	session, err := manager.runtimeTarget.openSession()
+	runtimeTarget := manager.registry.runtimeTarget
+	session, err := runtimeTarget.openSession()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,10 +722,11 @@ func TestDebugAttachNativeReplacesNonMatchingRunnerForBreakpointScript(t *testin
 }
 
 func TestDebugRunnerDestroyDetachesNativeWithoutClosingTransport(t *testing.T) {
+	registry := newDebugRegistry("127.0.0.1", 9229)
 	target := &debugTarget{
-		id:      "target",
-		script:  &Script{ID: "service.user", File: "scripts/service/user.ts"},
-		manager: newDebugManager(),
+		id:       "target",
+		script:   &Script{ID: "service.user", File: "scripts/service/user.ts"},
+		registry: registry,
 	}
 	session, err := target.openSession()
 	if err != nil {
@@ -876,21 +1051,18 @@ func TestInterceptBreakpointByUrl(t *testing.T) {
 		Mappings: ";;;;;" + "AAAA", // 5 个空行后，第 6 行 (idx 5) 映射到 source 0, line 0
 	}
 
-	target := &debugTarget{
-		id:      "test-target",
-		script:  &Script{ID: "test", File: sourceFile},
-		manager: newDebugManager(),
-	}
+	registry := newDebugRegistry("127.0.0.1", 9229)
+	target := registry.registerScript(&Script{ID: "test", File: sourceFile})
 	// 直接设置缓存的 source map
 	target.flatSourceMap = sm
 
 	// 模拟 VSCode 发送的 setBreakpointByUrl 消息：源行 0
 	msg := `{"id":42,"method":"Debugger.setBreakpointByUrl","params":{"lineNumber":0,"columnNumber":0,"url":"file:///Users/test/scripts/schedule.ts"}}`
-	result := target.interceptBreakpointByUrl([]byte(msg))
+	rewrite := target.rewriteBreakpointByURL([]byte(msg))
 
 	// 解析结果，检查 lineNumber 被修改为 5
 	var parsed map[string]interface{}
-	if err := json.Unmarshal(result, &parsed); err != nil {
+	if err := json.Unmarshal(rewrite.NativeMessage, &parsed); err != nil {
 		t.Fatal(err)
 	}
 	params := parsed["params"].(map[string]interface{})
@@ -901,15 +1073,15 @@ func TestInterceptBreakpointByUrl(t *testing.T) {
 
 	// 不匹配的消息应原样返回
 	otherMsg := `{"id":43,"method":"Debugger.setBreakpointByUrl","params":{"lineNumber":10,"columnNumber":0,"url":"file:///nonexistent.ts"}}`
-	otherResult := target.interceptBreakpointByUrl([]byte(otherMsg))
-	if string(otherResult) != otherMsg {
+	otherRewrite := target.rewriteBreakpointByURL([]byte(otherMsg))
+	if string(otherRewrite.NativeMessage) != otherMsg {
 		t.Fatal("expected unmatched message to pass through unchanged")
 	}
 
 	// 非 setBreakpointByUrl 消息应原样返回
 	enableMsg := `{"id":1,"method":"Debugger.enable"}`
-	enableResult := target.interceptBreakpointByUrl([]byte(enableMsg))
-	if string(enableResult) != enableMsg {
+	enableRewrite := target.rewriteBreakpointByURL([]byte(enableMsg))
+	if string(enableRewrite.NativeMessage) != enableMsg {
 		t.Fatal("expected non-breakpoint message to pass through unchanged")
 	}
 }
@@ -925,20 +1097,14 @@ func TestRuntimeTargetInterceptBreakpointByUrlFindsScriptSourceMap(t *testing.T)
 		Mappings: ";;;;;" + "AACA",
 	}
 
-	scriptTarget := &debugTarget{
-		id:            "script-target",
-		script:        &Script{ID: "service.user", File: sourceFile},
-		manager:       manager,
-		flatSourceMap: sm,
-	}
-	manager.targets[scriptTarget.id] = scriptTarget
-	manager.byScript[scriptTarget.script.ID] = scriptTarget
+	scriptTarget := manager.registry.registerScript(&Script{ID: "service.user", File: sourceFile})
+	scriptTarget.flatSourceMap = sm
 
 	msg := `{"id":42,"method":"Debugger.setBreakpointByUrl","params":{"lineNumber":1,"columnNumber":0,"url":"file:///Users/test/scripts/schedule.ts"}}`
-	result := manager.runtimeTarget.interceptBreakpointByUrl([]byte(msg))
+	rewrite := manager.registry.runtimeTarget.rewriteBreakpointByURL([]byte(msg))
 
 	var parsed map[string]interface{}
-	if err := json.Unmarshal(result, &parsed); err != nil {
+	if err := json.Unmarshal(rewrite.NativeMessage, &parsed); err != nil {
 		t.Fatal(err)
 	}
 	params := parsed["params"].(map[string]interface{})
