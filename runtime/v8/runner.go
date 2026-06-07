@@ -285,22 +285,24 @@ func (runner *Runner) _exec() {
 	inspector := runner.inspector
 	runner.mu.Unlock()
 
-	target := v8Debug.targetForScript(inv.script)
-	log.Info(fmt.Sprintf("[V8 Debug] _exec script %s, target: %t, inspector: %t", inv.script.ID, target != nil, inspector != nil))
-	if target != nil && inspector != nil {
-		log.Info(fmt.Sprintf("[V8 Debug] attaching runner for script %s (target id: %s)", inv.script.ID, target.id))
-		target.attachRunner(runner, inspector, ctx)
-		runner.mu.Lock()
-		runner.debugTarget = target
-		runner.mu.Unlock()
+	scriptTarget := v8Debug.targetForScript(inv.script)
+	sessionTarget := v8Debug.sessionTargetForScript(inv.script)
+	log.Info(fmt.Sprintf("[V8 Debug] _exec script %s, scriptTarget: %t, sessionTarget: %t, inspector: %t", inv.script.ID, scriptTarget != nil, sessionTarget != nil, inspector != nil))
+	if sessionTarget != nil && inspector != nil {
+		log.Info(fmt.Sprintf("[V8 Debug] attaching runner for script %s (target id: %s)", inv.script.ID, sessionTarget.id))
+		if sessionTarget.attachRunner(runner, inspector, ctx, inv.script) {
+			runner.mu.Lock()
+			runner.debugTarget = sessionTarget
+			runner.mu.Unlock()
+		}
 	}
 
 	// Create instance of the script
 	source := inv.script.Source
 	origin := inv.script.File
-	if target != nil {
-		source = target.scriptSource()
-		origin = target.scriptURL()
+	if scriptTarget != nil {
+		source = scriptTarget.scriptSource()
+		origin = scriptTarget.scriptURL()
 	}
 	instance, err := iso.CompileUnboundScript(source, origin, v8go.CompileOptions{})
 	if err != nil {

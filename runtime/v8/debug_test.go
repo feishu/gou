@@ -33,7 +33,7 @@ func (session *fakeDebugNativeSession) Close() error {
 	return nil
 }
 
-func TestDebugListReturnsDevToolsTarget(t *testing.T) {
+func TestDebugListReturnsRuntimeTargetByDefault(t *testing.T) {
 	manager := newDebugManager()
 	manager.enabled = true
 	manager.host = "127.0.0.1"
@@ -74,6 +74,120 @@ func TestDebugListReturnsDevToolsTarget(t *testing.T) {
 	target := targets[0]
 	if target.Type != "node" {
 		t.Fatalf("expected node target, got %s", target.Type)
+	}
+	if target.ID != debugRuntimeTargetID {
+		t.Fatalf("expected runtime target id, got %s", target.ID)
+	}
+	if target.Title != "Yao Runtime" {
+		t.Fatalf("unexpected target title: %s", target.Title)
+	}
+	if target.WebSocketDebuggerURL != "ws://127.0.0.1:9229/ws/runtime" {
+		t.Fatalf("unexpected websocket debugger url: %s", target.WebSocketDebuggerURL)
+	}
+}
+
+func TestDebugListIgnoresDebugTargetFileByDefault(t *testing.T) {
+	manager := newDebugManager()
+	manager.enabled = true
+	manager.host = "127.0.0.1"
+	manager.port = 9229
+
+	oldApp := application.App
+	oldScripts := Scripts
+	oldRootScripts := RootScripts
+	t.Cleanup(func() {
+		application.App = oldApp
+		Scripts = oldScripts
+		RootScripts = oldRootScripts
+		manager.stop()
+	})
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, ".debug_target"), "scripts/service/user.ts")
+	app, err := application.OpenFromDisk(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.Load(app)
+
+	Scripts = map[string]*Script{
+		"service.user": {
+			ID:   "service.user",
+			File: "scripts/service/user.ts",
+		},
+		"service.order": {
+			ID:   "service.order",
+			File: "scripts/service/order.ts",
+		},
+	}
+	RootScripts = map[string]*Script{}
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9229/json/list", nil)
+	rec := httptest.NewRecorder()
+	manager.handleList(rec, req)
+
+	var targets []debugTargetDescriptor
+	if err := json.Unmarshal(rec.Body.Bytes(), &targets); err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].ID != debugRuntimeTargetID {
+		t.Fatalf("expected default list to return runtime target, got %#v", targets)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9229/json/list?all=1", nil)
+	rec = httptest.NewRecorder()
+	manager.handleList(rec, req)
+
+	targets = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &targets); err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].Title != "scripts/service/user.ts" {
+		t.Fatalf("expected all list to honor debug target filter, got %#v", targets)
+	}
+}
+
+func TestDebugListAllReturnsScriptTargets(t *testing.T) {
+	manager := newDebugManager()
+	manager.enabled = true
+	manager.host = "127.0.0.1"
+	manager.port = 9229
+
+	oldScripts := Scripts
+	oldRootScripts := RootScripts
+	t.Cleanup(func() {
+		Scripts = oldScripts
+		RootScripts = oldRootScripts
+		manager.stop()
+	})
+
+	Scripts = map[string]*Script{
+		"service.user": {
+			ID:   "service.user",
+			File: "scripts/service/user.ts",
+		},
+	}
+	RootScripts = map[string]*Script{}
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9229/json/list?all=1", nil)
+	rec := httptest.NewRecorder()
+	manager.handleList(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var targets []debugTargetDescriptor
+	if err := json.Unmarshal(rec.Body.Bytes(), &targets); err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("expected one target, got %d", len(targets))
+	}
+
+	target := targets[0]
+	if target.ID == debugRuntimeTargetID {
+		t.Fatal("expected script target, got runtime target")
 	}
 	if target.Title != "scripts/service/user.ts" {
 		t.Fatalf("unexpected target title: %s", target.Title)
@@ -175,12 +289,12 @@ export function Run() {
 		t.Fatal("expected non-empty mappings")
 	}
 
-	mainFile := filepath.Join(root, file)
+	mainFile := "file://" + filepath.ToSlash(filepath.Join(root, file))
 	if !containsString(smap.Sources, mainFile) {
 		t.Fatalf("expected main source %s, got %#v", mainFile, smap.Sources)
 	}
 
-	importFile := filepath.Join(root, "scripts", "service", "consumer", "registration", "helper.ts")
+	importFile := "file://" + filepath.ToSlash(filepath.Join(root, "scripts", "service", "consumer", "registration", "helper.ts"))
 	if !containsString(smap.Sources, importFile) {
 		t.Fatalf("expected import source %s in sources %#v", importFile, smap.Sources)
 	}
@@ -226,6 +340,68 @@ func TestDebugOpenSessionReplacesExistingSession(t *testing.T) {
 	}
 }
 
+func TestDebugRuntimeSessionSelectedWithoutDebugTargetFile(t *testing.T) {
+	manager := newDebugManager()
+	manager.enabled = true
+	manager.host = "127.0.0.1"
+	manager.port = 9229
+
+	session, err := manager.runtimeTarget.openSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = session.Close()
+		manager.stop()
+	})
+
+	script := &Script{ID: "service.user", File: "scripts/service/user.ts"}
+	if target := manager.sessionTargetForScript(script); target != manager.runtimeTarget {
+		t.Fatalf("expected runtime target to be selected, got %#v", target)
+	}
+
+	scriptTarget := manager.targetForScript(script)
+	if scriptTarget == nil {
+		t.Fatal("expected script target to still be registered for source maps")
+	}
+	if scriptTarget.id == manager.runtimeTarget.id {
+		t.Fatal("script target must stay separate from runtime target")
+	}
+}
+
+func TestDebugRuntimeSessionSkipsScriptsWithoutMatchingBreakpoints(t *testing.T) {
+	manager := newDebugManager()
+	manager.enabled = true
+	manager.host = "127.0.0.1"
+	manager.port = 9229
+
+	session, err := manager.runtimeTarget.openSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = session.Close()
+		manager.stop()
+	})
+
+	schedule := &Script{ID: "service.schedule", File: "/Users/test/scripts/schedule.ts"}
+	delayed := &Script{ID: "consumer.delayed_queue", File: "/Users/test/scripts/delayed_queue.ts"}
+	scheduleTarget := manager.ensureTarget(schedule)
+	delayedTarget := manager.ensureTarget(delayed)
+	scheduleTarget.flatSourceMap = &SourceMap{Sources: []string{"file:///Users/test/scripts/schedule.ts"}}
+	delayedTarget.flatSourceMap = &SourceMap{Sources: []string{"file:///Users/test/scripts/delayed_queue.ts"}}
+	session.breakpoints = [][]byte{
+		[]byte(`{"method":"Debugger.setBreakpointByUrl","params":{"lineNumber":101,"url":"file:///Users/test/scripts/schedule.ts"}}`),
+	}
+
+	if target := manager.sessionTargetForScript(schedule); target != manager.runtimeTarget {
+		t.Fatalf("expected matching script to use runtime target, got %#v", target)
+	}
+	if target := manager.sessionTargetForScript(delayed); target != delayedTarget {
+		t.Fatalf("expected non-matching script to avoid runtime target, got %#v", target)
+	}
+}
+
 func TestDebugDetachNativeForRunnerIgnoresDifferentRunner(t *testing.T) {
 	session := &debugSession{
 		id:       "target",
@@ -261,6 +437,105 @@ func TestDebugDetachNativeForRunnerIgnoresDifferentRunner(t *testing.T) {
 	defer session.mu.Unlock()
 	if session.native != nil || session.runner != nil {
 		t.Fatal("expected native session to detach")
+	}
+}
+
+func TestDebugAttachNativeDoesNotReplaceDifferentActiveRunner(t *testing.T) {
+	session := &debugSession{
+		id:       "target",
+		outbound: make(chan []byte, 1),
+	}
+	owner := &Runner{}
+	other := &Runner{}
+	ownerClosed := false
+	otherClosed := false
+	ownerNative := &fakeDebugNativeSession{
+		close: func() error {
+			ownerClosed = true
+			return nil
+		},
+	}
+	otherNative := &fakeDebugNativeSession{
+		close: func() error {
+			otherClosed = true
+			return nil
+		},
+	}
+
+	session.attachNative(owner, ownerNative)
+	session.attachNative(other, otherNative)
+
+	if ownerClosed {
+		t.Fatal("expected active native session to remain open")
+	}
+	if !otherClosed {
+		t.Fatal("expected competing native session to be closed")
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.native != ownerNative || session.runner != owner {
+		t.Fatal("expected active runner native session to remain attached")
+	}
+}
+
+func TestDebugAttachNativeReplacesNonMatchingRunnerForBreakpointScript(t *testing.T) {
+	manager := newDebugManager()
+	manager.enabled = true
+	manager.host = "127.0.0.1"
+	manager.port = 9229
+
+	session, err := manager.runtimeTarget.openSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = session.Close()
+		manager.stop()
+	})
+
+	schedule := &Script{ID: "service.schedule", File: "/Users/test/scripts/schedule.ts"}
+	delayed := &Script{ID: "consumer.delayed_queue", File: "/Users/test/scripts/delayed_queue.ts"}
+	scheduleTarget := manager.ensureTarget(schedule)
+	delayedTarget := manager.ensureTarget(delayed)
+	scheduleTarget.flatSourceMap = &SourceMap{Sources: []string{"file:///Users/test/scripts/schedule.ts"}}
+	delayedTarget.flatSourceMap = &SourceMap{Sources: []string{"file:///Users/test/scripts/delayed_queue.ts"}}
+
+	background := &Runner{script: delayed}
+	request := &Runner{script: schedule}
+	backgroundClosed := false
+	requestClosed := false
+	backgroundNative := &fakeDebugNativeSession{
+		close: func() error {
+			backgroundClosed = true
+			return nil
+		},
+	}
+	requestNative := &fakeDebugNativeSession{
+		close: func() error {
+			requestClosed = true
+			return nil
+		},
+	}
+
+	if !session.attachNative(background, backgroundNative) {
+		t.Fatal("expected background runner to attach before breakpoints exist")
+	}
+	session.breakpoints = [][]byte{
+		[]byte(`{"method":"Debugger.setBreakpointByUrl","params":{"lineNumber":101,"url":"file:///Users/test/scripts/schedule.ts"}}`),
+	}
+	if !session.attachNative(request, requestNative) {
+		t.Fatal("expected breakpoint script runner to replace non-matching runner")
+	}
+	if !backgroundClosed {
+		t.Fatal("expected old background native session to close")
+	}
+	if requestClosed {
+		t.Fatal("expected request native session to stay open")
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.native != requestNative || session.runner != request {
+		t.Fatal("expected breakpoint script runner to own native session")
 	}
 }
 
@@ -455,6 +730,27 @@ func TestDebugDispatchReturnsErrorWhenNativeStillAttached(t *testing.T) {
 	}
 }
 
+func TestDebugDispatchSetBreakpointWithoutLineNumberReachesNative(t *testing.T) {
+	session := &debugSession{
+		id:       "target",
+		outbound: make(chan []byte, 1),
+	}
+	dispatched := false
+	session.attachNative(nil, &fakeDebugNativeSession{
+		dispatch: func([]byte) error {
+			dispatched = true
+			return nil
+		},
+	})
+
+	if err := session.Dispatch([]byte(`{"id":1,"method":"Debugger.setBreakpointByUrl"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !dispatched {
+		t.Fatal("expected breakpoint request without lineNumber to reach native session")
+	}
+}
+
 func writeTestFile(t *testing.T, file string, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
@@ -520,7 +816,7 @@ func TestReverseMapSourcePosition(t *testing.T) {
 }
 
 func TestMatchSourceByURL(t *testing.T) {
-	sources := []string{"/Users/test/a.ts", "/Users/test/b.ts"}
+	sources := []string{"file:///Users/test/a.ts", "/Users/test/b.ts"}
 
 	idx := matchSourceByURL(sources, "file:///Users/test/a.ts")
 	if idx != 0 {
@@ -607,5 +903,39 @@ func TestInterceptBreakpointByUrl(t *testing.T) {
 	enableResult := target.interceptBreakpointByUrl([]byte(enableMsg))
 	if string(enableResult) != enableMsg {
 		t.Fatal("expected non-breakpoint message to pass through unchanged")
+	}
+}
+
+func TestRuntimeTargetInterceptBreakpointByUrlFindsScriptSourceMap(t *testing.T) {
+	manager := newDebugManager()
+	manager.enabled = true
+	sourceFile := "/Users/test/scripts/schedule.ts"
+
+	sm := &SourceMap{
+		Version:  3,
+		Sources:  []string{sourceFile},
+		Mappings: ";;;;;" + "AACA",
+	}
+
+	scriptTarget := &debugTarget{
+		id:            "script-target",
+		script:        &Script{ID: "service.user", File: sourceFile},
+		manager:       manager,
+		flatSourceMap: sm,
+	}
+	manager.targets[scriptTarget.id] = scriptTarget
+	manager.byScript[scriptTarget.script.ID] = scriptTarget
+
+	msg := `{"id":42,"method":"Debugger.setBreakpointByUrl","params":{"lineNumber":1,"columnNumber":0,"url":"file:///Users/test/scripts/schedule.ts"}}`
+	result := manager.runtimeTarget.interceptBreakpointByUrl([]byte(msg))
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	params := parsed["params"].(map[string]interface{})
+	gotLine := int(params["lineNumber"].(float64))
+	if gotLine != 5 {
+		t.Fatalf("expected lineNumber 5 (compiled), got %d", gotLine)
 	}
 }

@@ -331,16 +331,18 @@ func debugSourceMap(sm *SourceMap, fallbackFile string) *SourceMap {
 		rawSources = []string{fallbackFile}
 	}
 
+	sourcePaths := make([]string, len(rawSources))
 	sources := make([]string, len(rawSources))
 	for i, source := range rawSources {
-		sources[i] = debugSourcePath(source, sm.SourceRoot, fallbackFile)
+		sourcePaths[i] = debugSourcePath(source, sm.SourceRoot, fallbackFile)
+		sources[i] = debugSourceURL(sourcePaths[i])
 	}
 
 	sourcesContent := sm.SourcesContent
 	if len(sourcesContent) == 0 && len(sources) > 0 {
 		sourcesContent = make([]string, len(sources))
-		for i, source := range sources {
-			if content, err := os.ReadFile(source); err == nil {
+		for i, sourcePath := range sourcePaths {
+			if content, err := os.ReadFile(sourcePath); err == nil {
 				sourcesContent[i] = string(content)
 			}
 		}
@@ -385,6 +387,21 @@ func debugSourcePath(source string, sourceRoot string, fallbackFile string) stri
 		return filepath.Join(filepath.Dir(fallbackFile), source)
 	}
 	return source
+}
+
+func debugSourceURL(source string) string {
+	if source == "" {
+		return source
+	}
+	if u, err := url.Parse(source); err == nil && u.Scheme != "" {
+		return source
+	}
+
+	file := filepath.Clean(filepath.FromSlash(source))
+	if filepath.IsAbs(file) {
+		return (&url.URL{Scheme: "file", Path: file}).String()
+	}
+	return filepath.ToSlash(source)
 }
 
 func debugAppRoot() string {
@@ -684,16 +701,40 @@ func flattenDebugSourceMap(indexed *debugIndexedSourceMap) (*SourceMap, error) {
 
 // matchSourceByURL 通过直接 URL 匹配 source map 中的源文件。
 func matchSourceByURL(sources []string, cdpURL string) int {
-	path := cdpURL
-	if strings.HasPrefix(path, "file://") {
-		path = strings.TrimPrefix(path, "file://")
-	}
 	for i, source := range sources {
-		if source == path {
+		if debugSourceMatchesURL(source, cdpURL) {
 			return i
 		}
 	}
 	return -1
+}
+
+func debugSourceMatchesURL(source string, cdpURL string) bool {
+	if source == cdpURL {
+		return true
+	}
+
+	sourceURL := debugSourceURL(source)
+	if sourceURL == cdpURL {
+		return true
+	}
+
+	sourcePath := debugSourceFilePath(source)
+	cdpPath := debugSourceFilePath(cdpURL)
+	return sourcePath != "" && cdpPath != "" && sourcePath == cdpPath
+}
+
+func debugSourceFilePath(source string) string {
+	if source == "" {
+		return ""
+	}
+	if u, err := url.Parse(source); err == nil && u.Scheme == "file" {
+		return filepath.Clean(filepath.FromSlash(u.Path))
+	}
+	if u, err := url.Parse(source); err == nil && u.Scheme != "" {
+		return ""
+	}
+	return filepath.Clean(filepath.FromSlash(source))
 }
 
 // matchSourceByRegex 通过 CDP urlRegex 匹配 source map 中的源文件。
@@ -703,7 +744,7 @@ func matchSourceByRegex(sources []string, urlRegex string) int {
 		return -1
 	}
 	for i, source := range sources {
-		sourceURL := (&url.URL{Scheme: "file", Path: source}).String()
+		sourceURL := debugSourceURL(source)
 		if re.MatchString(sourceURL) {
 			return i
 		}

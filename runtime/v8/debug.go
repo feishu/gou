@@ -25,13 +25,14 @@ import (
 )
 
 type debugManager struct {
-	mu       sync.Mutex
-	enabled  bool
-	host     string
-	port     int
-	server   *http.Server
-	targets  map[string]*debugTarget
-	byScript map[string]*debugTarget
+	mu            sync.Mutex
+	enabled       bool
+	host          string
+	port          int
+	server        *http.Server
+	runtimeTarget *debugTarget
+	targets       map[string]*debugTarget
+	byScript      map[string]*debugTarget
 }
 
 type debugTarget struct {
@@ -46,7 +47,6 @@ type debugTarget struct {
 }
 
 var cdpLogFile *os.File
-
 
 func init() {
 	f, err := os.OpenFile("/tmp/cdp_trace.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
@@ -95,13 +95,21 @@ type debugTargetDescriptor struct {
 	WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
 }
 
+const debugRuntimeTargetID = "runtime"
+
 var v8Debug = newDebugManager()
 
 func newDebugManager() *debugManager {
-	return &debugManager{
+	manager := &debugManager{
 		targets:  map[string]*debugTarget{},
 		byScript: map[string]*debugTarget{},
 	}
+	manager.runtimeTarget = &debugTarget{
+		id:      debugRuntimeTargetID,
+		groupID: debugContextGroupID(debugRuntimeTargetID),
+		manager: manager,
+	}
+	return manager
 }
 
 func startDebug(inspect Inspect) error {
@@ -181,12 +189,16 @@ func (manager *debugManager) stop() {
 	for _, target := range manager.targets {
 		targets = append(targets, target)
 	}
+	runtimeTarget := manager.runtimeTarget
 	manager.server = nil
 	manager.enabled = false
 	manager.targets = map[string]*debugTarget{}
 	manager.byScript = map[string]*debugTarget{}
 	manager.mu.Unlock()
 
+	if runtimeTarget != nil {
+		runtimeTarget.closeSession()
+	}
 	for _, target := range targets {
 		target.closeSession()
 	}
@@ -242,7 +254,112 @@ func (manager *debugManager) targetForScript(script *Script) *debugTarget {
 	return manager.ensureTarget(script)
 }
 
+func (manager *debugManager) sessionTargetForScript(script *Script) *debugTarget {
+	if script == nil || !manager.isEnabled() {
+		return nil
+	}
+
+	scriptTarget := manager.ensureTarget(script)
+	if scriptTarget != nil && scriptTarget.currentSession() != nil {
+		return scriptTarget
+	}
+
+	manager.mu.Lock()
+	runtimeTarget := manager.runtimeTarget
+	manager.mu.Unlock()
+	if runtimeTarget != nil {
+		session := runtimeTarget.currentSession()
+		if session != nil && session.shouldAttachScript(script) {
+			return runtimeTarget
+		}
+	}
+	return scriptTarget
+}
+
+func (session *debugSession) shouldAttachScript(script *Script) bool {
+	if session == nil || script == nil {
+		return false
+	}
+	if session.target == nil || session.target.manager == nil {
+		return true
+	}
+
+	target := session.target.manager.ensureTarget(script)
+	if target == nil {
+		return true
+	}
+	return session.hasBreakpointForTarget(target)
+}
+
+func (session *debugSession) hasBreakpointForTarget(target *debugTarget) bool {
+	session.breakpointsMu.Lock()
+	breakpoints := make([][]byte, len(session.breakpoints))
+	copy(breakpoints, session.breakpoints)
+	session.breakpointsMu.Unlock()
+
+	if len(breakpoints) == 0 {
+		return true
+	}
+
+	hasURLBreakpoint := false
+	for _, bpMessage := range breakpoints {
+		var bp struct {
+			Method string `json:"method"`
+			Params struct {
+				URL      string `json:"url"`
+				URLRegex string `json:"urlRegex"`
+			} `json:"params"`
+		}
+		if err := jsoniter.Unmarshal(bpMessage, &bp); err != nil {
+			continue
+		}
+		if bp.Method != "Debugger.setBreakpointByUrl" {
+			continue
+		}
+		if bp.Params.URL == "" && bp.Params.URLRegex == "" {
+			continue
+		}
+
+		hasURLBreakpoint = true
+		if bp.Params.URL != "" && target.manager != nil {
+			exactTarget := target.manager.targetForBreakpointURL(bp.Params.URL)
+			if exactTarget != nil {
+				if exactTarget == target {
+					return true
+				}
+				continue
+			}
+		}
+		if _, sourceIdx := target.matchOwnBreakpointSourceMap(bp.Params.URL, bp.Params.URLRegex); sourceIdx >= 0 {
+			return true
+		}
+	}
+
+	return !hasURLBreakpoint
+}
+
+func (manager *debugManager) targetForBreakpointURL(cdpURL string) *debugTarget {
+	manager.mu.Lock()
+	targets := make([]*debugTarget, 0, len(manager.targets))
+	for _, target := range manager.targets {
+		targets = append(targets, target)
+	}
+	manager.mu.Unlock()
+
+	for _, target := range targets {
+		if debugSourceMatchesURL(debugScriptURL(target.script), cdpURL) {
+			return target
+		}
+	}
+	return nil
+}
+
 func (manager *debugManager) findTarget(id string) *debugTarget {
+	if id == debugRuntimeTargetID {
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		return manager.runtimeTarget
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	return manager.targets[id]
@@ -280,6 +397,13 @@ func (manager *debugManager) descriptors(r *http.Request) []debugTargetDescripto
 	return descriptors
 }
 
+func (manager *debugManager) runtimeDescriptor(r *http.Request) debugTargetDescriptor {
+	manager.mu.Lock()
+	target := manager.runtimeTarget
+	manager.mu.Unlock()
+	return target.descriptor(r)
+}
+
 func (manager *debugManager) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	writeDebugJSON(w, map[string]string{
 		"Browser":          "Yao/v8go",
@@ -290,6 +414,12 @@ func (manager *debugManager) handleVersion(w http.ResponseWriter, _ *http.Reques
 
 func (manager *debugManager) handleList(w http.ResponseWriter, r *http.Request) {
 	log.Info(fmt.Sprintf("[V8 Debug] handleList requested from %s", r.RemoteAddr))
+
+	if r.URL.Query().Get("all") != "1" {
+		writeDebugJSON(w, []debugTargetDescriptor{manager.runtimeDescriptor(r)})
+		return
+	}
+
 	descriptors := manager.descriptors(r)
 
 	if application.App != nil && application.App.Root() != "" {
@@ -321,7 +451,7 @@ func (manager *debugManager) handleNew(w http.ResponseWriter, r *http.Request) {
 		scriptID = strings.TrimPrefix(scriptID, "scripts.")
 	}
 	if scriptID == "" {
-		http.Error(w, "missing script query", http.StatusBadRequest)
+		writeDebugJSON(w, manager.runtimeDescriptor(r))
 		return
 	}
 
@@ -415,17 +545,24 @@ func (manager *debugManager) handleSourceMap(w http.ResponseWriter, r *http.Requ
 }
 
 func (target *debugTarget) descriptor(r *http.Request) debugTargetDescriptor {
-	title := target.script.ID
-	if target.script.File != "" {
-		title = target.script.File
+	title := "Yao Runtime"
+	description := "Yao v8go JavaScript runtime"
+	targetURL := "yao://runtime"
+	if target.script != nil {
+		title = target.script.ID
+		if target.script.File != "" {
+			title = target.script.File
+		}
+		description = "Yao v8go JavaScript"
+		targetURL = target.scriptURL()
 	}
 	wsURL := fmt.Sprintf("ws://%s/ws/%s", target.host(r), target.id)
 	return debugTargetDescriptor{
 		ID:                   target.id,
 		Type:                 "node",
 		Title:                title,
-		Description:          "Yao v8go JavaScript",
-		URL:                  target.scriptURL(),
+		Description:          description,
+		URL:                  targetURL,
 		DevtoolsFrontendURL:  fmt.Sprintf("devtools://devtools/bundled/js_app.html?ws=%s/ws/%s", target.host(r), target.id),
 		WebSocketDebuggerURL: wsURL,
 	}
@@ -444,24 +581,34 @@ func (target *debugTarget) sourceMapURL(r *http.Request) string {
 }
 
 func (target *debugTarget) scriptURL() string {
-	if target == nil || target.script == nil || target.script.File == "" {
+	if target == nil {
+		return ""
+	}
+	return debugScriptURL(target.script)
+}
+
+func debugScriptURL(script *Script) string {
+	if script == nil || script.File == "" {
 		return ""
 	}
 
-	file := filepath.Clean(filepath.FromSlash(target.script.File))
+	file := filepath.Clean(filepath.FromSlash(script.File))
 	if !filepath.IsAbs(file) && application.App != nil && application.App.Root() != "" {
 		file = filepath.Join(application.App.Root(), file)
 	}
 	if filepath.IsAbs(file) {
 		return (&url.URL{Scheme: "file", Path: file}).String()
 	}
-	return target.script.File
+	return script.File
 }
 
 // getFlatSourceMap 返回缓存的扁平 source map，用于断点反向映射。
 func (target *debugTarget) getFlatSourceMap() *SourceMap {
 	if target.flatSourceMap != nil {
 		return target.flatSourceMap
+	}
+	if target.script == nil {
+		return nil
 	}
 	target.flatSourceMapOnce.Do(func() {
 		sm, err := debugFlatSourceMap(target.script)
@@ -498,26 +645,25 @@ func (target *debugTarget) interceptBreakpointByUrl(message []byte) []byte {
 		return message
 	}
 
-	lineNum, _ := params["lineNumber"].(float64)
-	sourceLine := int(lineNum)
-
-	sm := target.getFlatSourceMap()
-	if sm == nil {
-		log.Warn("[V8 Debug] flat source map is nil for script %s (File: %s)", target.script.ID, target.script.File)
+	lineNum, ok := debugNumberParam(params["lineNumber"])
+	if !ok {
 		return message
 	}
+	sourceLine := int(lineNum)
 
-	// 通过 url 或 urlRegex 匹配 source map 中的源文件
-	sourceIdx := -1
 	var cdpURL string
-	if cdpURL, ok = params["url"].(string); ok && cdpURL != "" {
-		sourceIdx = matchSourceByURL(sm.Sources, cdpURL)
+	if value, ok := params["url"].(string); ok {
+		cdpURL = value
 	}
 	var urlRegex string
-	if sourceIdx < 0 {
-		if urlRegex, ok = params["urlRegex"].(string); ok && urlRegex != "" {
-			sourceIdx = matchSourceByRegex(sm.Sources, urlRegex)
-		}
+	if value, ok := params["urlRegex"].(string); ok {
+		urlRegex = value
+	}
+
+	sm, sourceIdx := target.matchBreakpointSourceMap(cdpURL, urlRegex)
+	if sm == nil {
+		log.Warn("[V8 Debug] flat source map is nil for breakpoint. URL: %s, Regex: %s", cdpURL, urlRegex)
+		return message
 	}
 	if sourceIdx < 0 {
 		log.Warn("[V8 Debug] source not matched in source map. URL: %s, Regex: %s, Sources: %v", cdpURL, urlRegex, sm.Sources)
@@ -543,6 +689,68 @@ func (target *debugTarget) interceptBreakpointByUrl(message []byte) []byte {
 		return message
 	}
 	return modified
+}
+
+func debugNumberParam(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		n, err := v.Float64()
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func (target *debugTarget) matchBreakpointSourceMap(cdpURL string, urlRegex string) (*SourceMap, int) {
+	if target.script != nil {
+		return target.matchOwnBreakpointSourceMap(cdpURL, urlRegex)
+	}
+	if target.manager == nil {
+		return nil, -1
+	}
+	return target.manager.matchBreakpointSourceMap(cdpURL, urlRegex)
+}
+
+func (target *debugTarget) matchOwnBreakpointSourceMap(cdpURL string, urlRegex string) (*SourceMap, int) {
+	sm := target.getFlatSourceMap()
+	if sm == nil {
+		return nil, -1
+	}
+	sourceIdx := -1
+	if cdpURL != "" {
+		sourceIdx = matchSourceByURL(sm.Sources, cdpURL)
+	}
+	if sourceIdx < 0 && urlRegex != "" {
+		sourceIdx = matchSourceByRegex(sm.Sources, urlRegex)
+	}
+	return sm, sourceIdx
+}
+
+func (manager *debugManager) matchBreakpointSourceMap(cdpURL string, urlRegex string) (*SourceMap, int) {
+	manager.refreshTargets()
+
+	manager.mu.Lock()
+	targets := make([]*debugTarget, 0, len(manager.targets))
+	for _, target := range manager.targets {
+		targets = append(targets, target)
+	}
+	manager.mu.Unlock()
+
+	for _, target := range targets {
+		sm, sourceIdx := target.matchOwnBreakpointSourceMap(cdpURL, urlRegex)
+		if sm != nil && sourceIdx >= 0 {
+			return sm, sourceIdx
+		}
+	}
+	return nil, -1
 }
 
 func (target *debugTarget) host(r *http.Request) string {
@@ -591,42 +799,49 @@ func (target *debugTarget) closeSession() {
 	}
 }
 
-func (target *debugTarget) attachRunner(runner *Runner, inspector *v8go.Inspector, ctx *v8go.Context) {
+func (target *debugTarget) attachRunner(runner *Runner, inspector *v8go.Inspector, ctx *v8go.Context, script *Script) bool {
 	session := target.currentSession()
-	log.Info(fmt.Sprintf("[V8 Debug] attachRunner script:%s, targetID:%s, sessionExist:%t, inspectorExist:%t, ctxExist:%t", target.script.ID, target.id, session != nil, inspector != nil, ctx != nil))
-	if session == nil || inspector == nil || ctx == nil {
-		return
+	if script == nil {
+		script = target.script
+	}
+	scriptID := ""
+	if script != nil {
+		scriptID = script.ID
+	}
+	log.Info(fmt.Sprintf("[V8 Debug] attachRunner script:%s, targetID:%s, sessionExist:%t, inspectorExist:%t, ctxExist:%t", scriptID, target.id, session != nil, inspector != nil, ctx != nil))
+	if session == nil || inspector == nil || ctx == nil || script == nil {
+		return false
 	}
 
+	scriptURL := debugScriptURL(script)
 	opt := v8go.InspectorOptions{
 		ContextGroupID: target.groupID,
-		Name:           target.scriptURL(),
-		Origin:         target.scriptURL(),
+		Name:           scriptURL,
+		Origin:         scriptURL,
 	}
 	if err := inspector.NotifyContextCreated(ctx, opt); err != nil {
 		log.Warn("[V8 Debug] context created failed: %s", err.Error())
-		return
+		return false
 	}
 	native, err := inspector.Connect(ctx, session, opt)
 	if err != nil {
 		log.Warn("[V8 Debug] inspector connect failed: %s", err.Error())
-		return
+		return false
 	}
-	session.attachNative(runner, native)
+	return session.attachNative(runner, native)
 }
 
 func (session *debugSession) Dispatch(message []byte) error {
 	// 拦截对第0行（lineNumber == 0）的 setBreakpointByUrl，避免 VSCode debugger 隐式入口断点卡死黑屏
 	if bytes.Contains(message, []byte("setBreakpointByUrl")) {
 		var msg struct {
-			ID     int    `json:"id"`
-			Method string `json:"method"`
-			Params struct {
-				LineNumber int `json:"lineNumber"`
-			} `json:"params"`
+			ID     int                    `json:"id"`
+			Method string                 `json:"method"`
+			Params map[string]interface{} `json:"params"`
 		}
 		if err := jsoniter.Unmarshal(message, &msg); err == nil && msg.Method == "Debugger.setBreakpointByUrl" {
-			if msg.Params.LineNumber == 0 {
+			lineNumber, hasLineNumber := debugNumberParam(msg.Params["lineNumber"])
+			if hasLineNumber && int(lineNumber) == 0 {
 				response, _ := jsoniter.Marshal(map[string]interface{}{
 					"id": msg.ID,
 					"result": map[string]interface{}{
@@ -640,6 +855,8 @@ func (session *debugSession) Dispatch(message []byte) error {
 			}
 		}
 	}
+
+	session.rememberBreakpoint(message)
 
 	// 拦截 setBreakpointByUrl：反向映射源行号 → 编译行号
 	if session.target != nil {
@@ -683,20 +900,7 @@ func (session *debugSession) Dispatch(message []byte) error {
 	}
 
 	// 记录断点指令，用于调试通道重连时恢复断点
-	if bytes.Contains(message, []byte("Debugger.setBreakpoint")) {
-		session.breakpointsMu.Lock()
-		exists := false
-		for _, existBp := range session.breakpoints {
-			if bytes.Equal(existBp, message) {
-				exists = true
-				break
-			}
-		}
-		if !exists {
-			session.breakpoints = append(session.breakpoints, append([]byte(nil), message...))
-		}
-		session.breakpointsMu.Unlock()
-	}
+	session.rememberBreakpoint(message)
 
 	// 移除断点指令
 	if bytes.Contains(message, []byte("Debugger.removeBreakpoint")) {
@@ -755,9 +959,7 @@ func (session *debugSession) Dispatch(message []byte) error {
 			}
 
 			if simulate {
-				session.simulatedMu.Lock()
-				session.simulated[msg.ID] = true
-				session.simulatedMu.Unlock()
+				session.markSimulated(msg.ID)
 
 				response, _ := jsoniter.Marshal(map[string]interface{}{
 					"id":     msg.ID,
@@ -796,7 +998,42 @@ func (session *debugSession) Dispatch(message []byte) error {
 	return native.Dispatch(message)
 }
 
-func (session *debugSession) attachNative(runner *Runner, native debugNativeSession) {
+func (session *debugSession) rememberBreakpoint(message []byte) {
+	if !bytes.Contains(message, []byte("Debugger.setBreakpoint")) {
+		return
+	}
+
+	var bp struct {
+		ID     int    `json:"id"`
+		Method string `json:"method"`
+	}
+	if err := jsoniter.Unmarshal(message, &bp); err != nil || bp.Method == "" {
+		return
+	}
+	if !strings.HasPrefix(bp.Method, "Debugger.setBreakpoint") {
+		return
+	}
+
+	session.breakpointsMu.Lock()
+	defer session.breakpointsMu.Unlock()
+
+	for i, existBp := range session.breakpoints {
+		var exist struct {
+			ID int `json:"id"`
+		}
+		if err := jsoniter.Unmarshal(existBp, &exist); err == nil && exist.ID > 0 && exist.ID == bp.ID {
+			session.breakpoints[i] = append([]byte(nil), message...)
+			return
+		}
+		if bytes.Equal(existBp, message) {
+			return
+		}
+	}
+
+	session.breakpoints = append(session.breakpoints, append([]byte(nil), message...))
+}
+
+func (session *debugSession) attachNative(runner *Runner, native debugNativeSession) bool {
 	session.nativeMu.Lock()
 	defer session.nativeMu.Unlock()
 
@@ -804,7 +1041,13 @@ func (session *debugSession) attachNative(runner *Runner, native debugNativeSess
 	if session.closed {
 		session.mu.Unlock()
 		_ = native.Close()
-		return
+		return false
+	}
+	if session.native != nil && session.runner != nil && session.runner != runner && !session.prefersRunner(runner, session.runner) {
+		session.mu.Unlock()
+		_ = native.Close()
+		log.Warn("[V8 Debug] native session is already attached to another runner")
+		return false
 	}
 	oldNative := session.native
 	session.runner = runner
@@ -828,9 +1071,7 @@ func (session *debugSession) attachNative(runner *Runner, native debugNativeSess
 			ID int `json:"id"`
 		}
 		if err := jsoniter.Unmarshal(initMsg, &initCmd); err == nil && initCmd.ID > 0 {
-			session.simulatedMu.Lock()
-			session.simulated[initCmd.ID] = true
-			session.simulatedMu.Unlock()
+			session.markSimulated(initCmd.ID)
 		}
 		if err := native.Dispatch(initMsg); err != nil {
 			log.Warn("[V8 Debug] restore initializer failed: %s", err.Error())
@@ -848,9 +1089,7 @@ func (session *debugSession) attachNative(runner *Runner, native debugNativeSess
 			ID int `json:"id"`
 		}
 		if err := jsoniter.Unmarshal(bpMessage, &bp); err == nil && bp.ID > 0 {
-			session.simulatedMu.Lock()
-			session.simulated[bp.ID] = true
-			session.simulatedMu.Unlock()
+			session.markSimulated(bp.ID)
 		}
 		if err := native.Dispatch(bpMessage); err != nil {
 			log.Warn("[V8 Debug] restore breakpoint failed: %s", err.Error())
@@ -860,9 +1099,31 @@ func (session *debugSession) attachNative(runner *Runner, native debugNativeSess
 	for _, message := range pending {
 		if err := native.Dispatch(message); err != nil {
 			log.Warn("[V8 Debug] pending dispatch failed: %s", err.Error())
-			return
+			return true
 		}
 	}
+	return true
+}
+
+func (session *debugSession) prefersRunner(next *Runner, current *Runner) bool {
+	nextScript := runnerScript(next)
+	currentScript := runnerScript(current)
+	if nextScript == nil || currentScript == nil {
+		return false
+	}
+
+	nextMatches := session.shouldAttachScript(nextScript)
+	currentMatches := session.shouldAttachScript(currentScript)
+	return nextMatches && !currentMatches
+}
+
+func runnerScript(runner *Runner) *Script {
+	if runner == nil {
+		return nil
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	return runner.script
 }
 
 func (session *debugSession) detachNative() {
@@ -893,6 +1154,18 @@ func (session *debugSession) enqueuePendingLocked(message []byte) error {
 	}
 	session.pending = append(session.pending, append([]byte(nil), message...))
 	return nil
+}
+
+func (session *debugSession) markSimulated(id int) {
+	if id <= 0 {
+		return
+	}
+	session.simulatedMu.Lock()
+	if session.simulated == nil {
+		session.simulated = map[int]bool{}
+	}
+	session.simulated[id] = true
+	session.simulatedMu.Unlock()
 }
 
 func (session *debugSession) setTransportClose(close func() error) {
