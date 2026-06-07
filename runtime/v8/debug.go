@@ -759,7 +759,7 @@ func (target *debugTarget) closeSession() {
 	}
 }
 
-func (target *debugTarget) attachRunner(runner *Runner, inspector *v8go.Inspector, ctx *v8go.Context, script *Script) bool {
+func (target *debugTarget) acquireRunnerLease(runner *Runner, inspector *v8go.Inspector, ctx *v8go.Context, script *Script) (*debugRunnerLease, bool) {
 	session := target.currentSession()
 	if script == nil {
 		script = target.script
@@ -768,9 +768,9 @@ func (target *debugTarget) attachRunner(runner *Runner, inspector *v8go.Inspecto
 	if script != nil {
 		scriptID = script.ID
 	}
-	log.Info(fmt.Sprintf("[V8 Debug] attachRunner script:%s, targetID:%s, sessionExist:%t, inspectorExist:%t, ctxExist:%t", scriptID, target.id, session != nil, inspector != nil, ctx != nil))
+	log.Info(fmt.Sprintf("[V8 Debug] acquireRunnerLease script:%s, targetID:%s, sessionExist:%t, inspectorExist:%t, ctxExist:%t", scriptID, target.id, session != nil, inspector != nil, ctx != nil))
 	if session == nil || inspector == nil || ctx == nil || script == nil {
-		return false
+		return nil, false
 	}
 
 	scriptURL := debugScriptURL(script)
@@ -781,14 +781,17 @@ func (target *debugTarget) attachRunner(runner *Runner, inspector *v8go.Inspecto
 	}
 	if err := inspector.NotifyContextCreated(ctx, opt); err != nil {
 		log.Warn("[V8 Debug] context created failed: %s", err.Error())
-		return false
+		return nil, false
 	}
 	native, err := inspector.Connect(ctx, session, opt)
 	if err != nil {
 		log.Warn("[V8 Debug] inspector connect failed: %s", err.Error())
-		return false
+		return nil, false
 	}
-	return session.attachNative(runner, native)
+	if !session.attachNative(runner, native) {
+		return nil, false
+	}
+	return newDebugRunnerLease(session, runner), true
 }
 
 func writeDebugJSON(w http.ResponseWriter, value interface{}) {

@@ -564,10 +564,9 @@ func TestDebugRunnerDestroyDetachesNativeWithoutClosingTransport(t *testing.T) {
 	})
 
 	runner := &Runner{
-		status:      RunnerStatusRunning,
-		keepalive:   true,
-		debugTarget: target,
-		destroyed:   make(chan struct{}),
+		status:    RunnerStatusRunning,
+		keepalive: true,
+		destroyed: make(chan struct{}),
 	}
 	nativeClosed := false
 	session.attachNative(runner, &fakeDebugNativeSession{
@@ -576,6 +575,7 @@ func TestDebugRunnerDestroyDetachesNativeWithoutClosingTransport(t *testing.T) {
 			return nil
 		},
 	})
+	runner.debugLease = newDebugRunnerLease(session, runner)
 
 	runner.destroy()
 	if !nativeClosed {

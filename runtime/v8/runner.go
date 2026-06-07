@@ -22,27 +22,27 @@ func (id ID) String() string {
 
 // Runner is the v8 runner
 type Runner struct {
-	mu          sync.Mutex
-	id          ID
-	iso         *v8go.Isolate
-	ctx         *v8go.Context
-	tmpl        *v8go.ObjectTemplate
-	inspector   *v8go.Inspector
-	debugTarget *debugTarget
-	status      uint8
-	closed      bool
-	dispatcher  *Dispatcher
-	signal      chan uint8
-	destroyed   chan struct{}
-	chResp      chan interface{}
-	keepalive   bool
-	script      *Script
-	method      string
-	sid         string
-	args        []interface{}
-	global      map[string]interface{}
-	invocation  runnerInvocation
-	caches      map[string]*v8go.Object
+	mu         sync.Mutex
+	id         ID
+	iso        *v8go.Isolate
+	ctx        *v8go.Context
+	tmpl       *v8go.ObjectTemplate
+	inspector  *v8go.Inspector
+	debugLease *debugRunnerLease
+	status     uint8
+	closed     bool
+	dispatcher *Dispatcher
+	signal     chan uint8
+	destroyed  chan struct{}
+	chResp     chan interface{}
+	keepalive  bool
+	script     *Script
+	method     string
+	sid        string
+	args       []interface{}
+	global     map[string]interface{}
+	invocation runnerInvocation
+	caches     map[string]*v8go.Object
 }
 
 var runnerHealthChecker = func(runner *Runner) bool {
@@ -290,9 +290,9 @@ func (runner *Runner) _exec() {
 	log.Info(fmt.Sprintf("[V8 Debug] _exec script %s, scriptTarget: %t, sessionTarget: %t, inspector: %t", inv.script.ID, scriptTarget != nil, sessionTarget != nil, inspector != nil))
 	if sessionTarget != nil && inspector != nil {
 		log.Info(fmt.Sprintf("[V8 Debug] attaching runner for script %s (target id: %s)", inv.script.ID, sessionTarget.id))
-		if sessionTarget.attachRunner(runner, inspector, ctx, inv.script) {
+		if lease, ok := sessionTarget.acquireRunnerLease(runner, inspector, ctx, inv.script); ok {
 			runner.mu.Lock()
-			runner.debugTarget = sessionTarget
+			runner.debugLease = lease
 			runner.mu.Unlock()
 		}
 	}
@@ -375,13 +375,13 @@ func (runner *Runner) destroy() {
 	ctx := runner.ctx
 	iso := runner.iso
 	inspector := runner.inspector
-	target := runner.debugTarget
+	lease := runner.debugLease
 	destroyed := runner.destroyed
 	keepalive := runner.keepalive
 	runner.ctx = nil
 	runner.iso = nil
 	runner.inspector = nil
-	runner.debugTarget = nil
+	runner.debugLease = nil
 	runner.caches = nil
 	runner.tmpl = nil
 	runner.mu.Unlock()
@@ -392,10 +392,8 @@ func (runner *Runner) destroy() {
 	if dispatcher != nil {
 		dispatcher.runnerDestroyed(true)
 	}
-	if target != nil {
-		if session := target.currentSession(); session != nil {
-			session.detachNativeForRunner(runner)
-		}
+	if lease != nil {
+		lease.Close()
 	}
 	if ctx != nil {
 		ctx.Close()
@@ -430,13 +428,12 @@ func (runner *Runner) reset() {
 	ctx := runner.ctx
 	iso := runner.iso
 	tmpl := runner.tmpl
-	target := runner.debugTarget
+	lease := runner.debugLease
+	runner.debugLease = nil
 	runner.mu.Unlock()
 
-	if target != nil {
-		if session := target.currentSession(); session != nil {
-			session.detachNativeForRunner(runner)
-		}
+	if lease != nil {
+		lease.Close()
 	}
 	if ctx != nil {
 		ctx.Close()
@@ -467,7 +464,6 @@ func (runner *Runner) reset() {
 		return
 	}
 	runner.ctx = nextCtx
-	runner.debugTarget = nil
 	runner.status = RunnerStatusReady
 	runner.mu.Unlock()
 
