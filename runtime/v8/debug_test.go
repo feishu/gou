@@ -390,8 +390,12 @@ func TestDebugRuntimeSessionSkipsScriptsWithoutMatchingBreakpoints(t *testing.T)
 	delayedTarget := manager.ensureTarget(delayed)
 	scheduleTarget.flatSourceMap = &SourceMap{Sources: []string{"file:///Users/test/scripts/schedule.ts"}}
 	delayedTarget.flatSourceMap = &SourceMap{Sources: []string{"file:///Users/test/scripts/delayed_queue.ts"}}
-	session.breakpoints = [][]byte{
-		[]byte(`{"method":"Debugger.setBreakpointByUrl","params":{"lineNumber":101,"url":"file:///Users/test/scripts/schedule.ts"}}`),
+	session.breakpointIntents = []debugBreakpointIntent{
+		{
+			Method:     "Debugger.setBreakpointByUrl",
+			URL:        "file:///Users/test/scripts/schedule.ts",
+			LineNumber: 101,
+		},
 	}
 
 	if target := manager.sessionTargetForScript(schedule); target != manager.runtimeTarget {
@@ -520,8 +524,12 @@ func TestDebugAttachNativeReplacesNonMatchingRunnerForBreakpointScript(t *testin
 	if !session.attachNative(background, backgroundNative) {
 		t.Fatal("expected background runner to attach before breakpoints exist")
 	}
-	session.breakpoints = [][]byte{
-		[]byte(`{"method":"Debugger.setBreakpointByUrl","params":{"lineNumber":101,"url":"file:///Users/test/scripts/schedule.ts"}}`),
+	session.breakpointIntents = []debugBreakpointIntent{
+		{
+			Method:     "Debugger.setBreakpointByUrl",
+			URL:        "file:///Users/test/scripts/schedule.ts",
+			LineNumber: 101,
+		},
 	}
 	if !session.attachNative(request, requestNative) {
 		t.Fatal("expected breakpoint script runner to replace non-matching runner")
