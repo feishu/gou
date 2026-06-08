@@ -329,7 +329,9 @@ func TestDebugListAllReturnsScriptTargets(t *testing.T) {
 	}
 }
 
-func TestDebugSourceMapReturnsTypeScriptSources(t *testing.T) {
+func prepareDebugSourceMapTarget(t *testing.T) (*debugManager, *debugTarget) {
+	t.Helper()
+
 	oldApp := application.App
 	oldRuntimeOption := runtimeOption
 	oldModules := Modules
@@ -390,6 +392,14 @@ export function Run() {
 		t.Fatal("expected debug target")
 	}
 
+	return manager, target
+}
+
+func TestDebugSourceMapReturnsTypeScriptSources(t *testing.T) {
+	manager, target := prepareDebugSourceMapTarget(t)
+	root := application.App.Root()
+	file := target.script.File
+
 	expectedScriptURL := "file://" + filepath.ToSlash(filepath.Join(root, file))
 	if got := target.scriptURL(); got != expectedScriptURL {
 		t.Fatalf("expected script url %s, got %s", expectedScriptURL, got)
@@ -435,6 +445,42 @@ export function Run() {
 	if !strings.Contains(smap.Mappings, ";") {
 		t.Fatal("expected semicolons in mappings for line offsets")
 	}
+	if len(smap.SourcesContent) == 0 {
+		t.Fatal("expected sourcesContent to be exposed by default")
+	}
+}
+
+func TestDebugSourceMapOmitsSourcesContentWhenPolicyDisabled(t *testing.T) {
+	manager, target := prepareDebugSourceMapTarget(t)
+	exposeSourceContent := false
+	manager.policy = currentDebugTransportPolicy(Inspect{
+		Enabled:             true,
+		Host:                "127.0.0.1",
+		Port:                9229,
+		ExposeSourceContent: &exposeSourceContent,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9229/source-map/"+target.id, nil)
+	rec := httptest.NewRecorder()
+	manager.handleSourceMap(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var smap SourceMap
+	if err := json.Unmarshal(rec.Body.Bytes(), &smap); err != nil {
+		t.Fatal(err)
+	}
+	if len(smap.Sources) == 0 {
+		t.Fatal("expected sources to remain available")
+	}
+	if smap.Mappings == "" {
+		t.Fatal("expected mappings to remain available")
+	}
+	if len(smap.SourcesContent) != 0 {
+		t.Fatalf("expected sourcesContent to be omitted, got %d entries", len(smap.SourcesContent))
+	}
 }
 
 func TestDebugOpenSessionReplacesExistingSession(t *testing.T) {
@@ -470,6 +516,45 @@ func TestDebugOpenSessionReplacesExistingSession(t *testing.T) {
 	}
 	if got := target.currentSession(); got != second {
 		t.Fatalf("expected current session to be replaced, got %#v", got)
+	}
+}
+
+func TestDebugWebSocketRejectsInvalidOriginBeforeReplacingSession(t *testing.T) {
+	manager := newDebugManager()
+	manager.enabled = true
+	manager.host = "127.0.0.1"
+	manager.port = 9229
+	manager.policy = currentDebugTransportPolicy(Inspect{Enabled: true, Host: "127.0.0.1", Port: 9229})
+	manager.registry = newDebugRegistry("127.0.0.1", 9229)
+	manager.registry.manager = manager
+
+	target := manager.registry.registerScript(&Script{ID: "service.user", File: "scripts/service/user.ts"})
+	first, err := target.openSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transportClosed := false
+	first.setTransportClose(func() error {
+		transportClosed = true
+		return nil
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9229/ws/"+target.id, nil)
+	req.Header.Set("Origin", "https://example.com")
+	rec := httptest.NewRecorder()
+	manager.handleWebSocket(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected forbidden websocket origin, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if first.isClosed() {
+		t.Fatal("invalid origin must not close the existing session")
+	}
+	if transportClosed {
+		t.Fatal("invalid origin must not close the existing transport")
+	}
+	if got := target.currentSession(); got != first {
+		t.Fatalf("expected current session to remain unchanged, got %#v", got)
 	}
 }
 

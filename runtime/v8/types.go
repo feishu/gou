@@ -65,9 +65,12 @@ type Option struct {
 
 // Inspect V8 inspector debug option
 type Inspect struct {
-	Enabled bool   `json:"enabled,omitempty"`
-	Host    string `json:"host,omitempty"`
-	Port    int    `json:"port,omitempty"`
+	Enabled             bool   `json:"enabled,omitempty"`
+	Host                string `json:"host,omitempty"`
+	Port                int    `json:"port,omitempty"`
+	Trace               bool   `json:"trace,omitempty"`
+	TracePath           string `json:"tracePath,omitempty"`
+	ExposeSourceContent *bool  `json:"exposeSourceContent,omitempty"`
 }
 
 // TSConfig TypeScript config

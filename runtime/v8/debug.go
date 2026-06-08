@@ -415,6 +415,12 @@ func (manager *debugManager) handleWebSocket(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	policy := manager.currentPolicy()
+	if !policy.CheckOrigin(r) {
+		http.Error(w, "websocket origin is not allowed", http.StatusForbidden)
+		return
+	}
+
 	session, err := target.openSession()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
@@ -422,7 +428,6 @@ func (manager *debugManager) handleWebSocket(w http.ResponseWriter, r *http.Requ
 	}
 	defer session.Close()
 
-	policy := manager.currentPolicy()
 	upgrader := websocket.Upgrader{CheckOrigin: policy.CheckOrigin}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
