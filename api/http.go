@@ -196,6 +196,9 @@ func (http HTTP) Route(router gin.IRoutes, path Path, allows ...string) {
 	if path.Out.Redirect != nil {
 		handlers = append(handlers, path.redirectHandler(getArgs))
 
+	} else if path.SSE != nil {
+		handlers = append(handlers, path.sseHandler())
+
 	} else if path.ProcessHandler {
 		handlers = append(handlers, path.processHandler())
 
