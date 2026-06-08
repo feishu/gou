@@ -44,6 +44,30 @@ func TestDebugRegistryBreakpointRewriteFailurePassesThrough(t *testing.T) {
 	}
 }
 
+func TestRuntimeTargetBreakpointRewriteDoesNotUseImportSourceMapForExactScript(t *testing.T) {
+	registry := newDebugRegistry("127.0.0.1", 9229)
+	sourceFile := "/app/scripts/service/common/consult.ts"
+	sourceURL := "file:///app/scripts/service/common/consult.ts"
+
+	importTarget := registry.registerScript(&Script{ID: "test.imports.consult", File: "/app/scripts/test/imports_consult.ts"})
+	importTarget.flatSourceMap = &SourceMap{
+		Version:  3,
+		Sources:  []string{sourceFile},
+		Mappings: ";;;;;" + "AACA",
+	}
+	registry.registerScript(&Script{ID: "service.common.consult", File: sourceFile})
+
+	original := []byte(`{"id":12,"method":"Debugger.setBreakpointByUrl","params":{"lineNumber":1,"columnNumber":0,"url":"` + sourceURL + `"}}`)
+	rewrite := registry.runtimeTarget.rewriteBreakpointByURL(original)
+
+	if !bytes.Equal(rewrite.NativeMessage, original) {
+		t.Fatalf("expected exact script without source map to pass through instead of using import source map, got %s", rewrite.NativeMessage)
+	}
+	if len(rewrite.Diagnostics) == 0 {
+		t.Fatal("expected diagnostics when exact script has no source map")
+	}
+}
+
 func TestDebugRegistrySessionTargetForScriptReturnsNilWhenInactive(t *testing.T) {
 	registry := newDebugRegistry("127.0.0.1", 9229)
 	session, err := registry.runtimeTarget.openSession()

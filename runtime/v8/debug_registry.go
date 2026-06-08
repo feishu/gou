@@ -310,6 +310,12 @@ func (registry *debugRegistry) deactivateAndSnapshot() ([]*debugTarget, *debugTa
 func (registry *debugRegistry) matchBreakpointSourceMap(cdpURL string, urlRegex string) (*SourceMap, int) {
 	registry.refreshTargets()
 
+	if cdpURL != "" {
+		if target := registry.targetForBreakpointURL(cdpURL); target != nil {
+			return target.matchOwnBreakpointSourceMap(cdpURL, urlRegex)
+		}
+	}
+
 	for _, target := range registry.scriptTargetsSnapshot() {
 		sm, sourceIdx := target.matchOwnBreakpointSourceMap(cdpURL, urlRegex)
 		if sm != nil && sourceIdx >= 0 {

@@ -29,6 +29,8 @@ type debugBreakpointRewrite struct {
 	Diagnostics   []string
 }
 
+const debugInternalPauseRequestID = -1000001
+
 type debugBreakpointRewriteFunc func(message []byte) debugBreakpointRewrite
 
 type debugSession struct {
@@ -44,6 +46,8 @@ type debugSession struct {
 	closed            bool
 	simulated         map[int]bool
 	simulatedMu       sync.Mutex
+	debuggerMu        sync.Mutex
+	stepIntoFollow    bool
 	breakpointsMu     sync.Mutex
 	breakpointIntents []debugBreakpointIntent
 	nativeBreakpoints [][]byte
@@ -74,7 +78,7 @@ func (session *debugSession) shouldAttachScript(script *Script) bool {
 	if !session.target.registry.isActive() {
 		return false
 	}
-	return session.hasBreakpointForTarget(target) && session.target.registry.isActive()
+	return (session.shouldFollowScript(script) || session.hasBreakpointForTarget(target)) && session.target.registry.isActive()
 }
 
 func (session *debugSession) Dispatch(message []byte) error {
@@ -102,6 +106,7 @@ func (session *debugSession) Dispatch(message []byte) error {
 		}
 	}
 
+	session.rememberDebuggerControl(message)
 	message = session.rememberBreakpoint(message)
 
 	logCDP("Client->V8", message)
@@ -275,6 +280,62 @@ func (session *debugSession) rememberBreakpoint(message []byte) []byte {
 	return nativeMessage
 }
 
+func (session *debugSession) rememberDebuggerControl(message []byte) {
+	if !bytes.Contains(message, []byte("Debugger.")) {
+		return
+	}
+
+	var msg struct {
+		Method string `json:"method"`
+	}
+	if err := jsoniter.Unmarshal(message, &msg); err != nil || msg.Method == "" {
+		return
+	}
+
+	switch msg.Method {
+	case "Debugger.stepInto":
+		session.armStepIntoFollow()
+	case "Debugger.resume", "Debugger.stepOver", "Debugger.stepOut", "Debugger.disable":
+		session.clearStepIntoFollow()
+	}
+}
+
+func (session *debugSession) armStepIntoFollow() {
+	session.debuggerMu.Lock()
+	session.stepIntoFollow = true
+	session.debuggerMu.Unlock()
+}
+
+func (session *debugSession) clearStepIntoFollow() {
+	session.debuggerMu.Lock()
+	session.stepIntoFollow = false
+	session.debuggerMu.Unlock()
+}
+
+func (session *debugSession) shouldFollowScript(script *Script) bool {
+	if script == nil {
+		return false
+	}
+	session.debuggerMu.Lock()
+	defer session.debuggerMu.Unlock()
+	return session.stepIntoFollow
+}
+
+func (session *debugSession) consumeStepIntoFollow(next *Runner, current *Runner) bool {
+	nextScript := runnerScript(next)
+	if nextScript == nil || next == current {
+		return false
+	}
+
+	session.debuggerMu.Lock()
+	defer session.debuggerMu.Unlock()
+	if !session.stepIntoFollow {
+		return false
+	}
+	session.stepIntoFollow = false
+	return true
+}
+
 func parseDebugBreakpointIntent(message []byte) debugBreakpointIntent {
 	var msg struct {
 		ID     int                    `json:"id"`
@@ -374,6 +435,85 @@ func (session *debugSession) nativeBreakpointsSnapshot() [][]byte {
 	return nativeBreakpoints
 }
 
+func (session *debugSession) refreshNativeBreakpoints() {
+	if session.breakpointRewrite == nil {
+		return
+	}
+
+	session.breakpointsMu.Lock()
+	defer session.breakpointsMu.Unlock()
+
+	for i, intent := range session.breakpointIntents {
+		if len(intent.Raw) == 0 {
+			continue
+		}
+
+		rewrite := session.breakpointRewrite(intent.Raw)
+		nativeMessage := append([]byte(nil), intent.Raw...)
+		if len(rewrite.NativeMessage) > 0 {
+			nativeMessage = append([]byte(nil), rewrite.NativeMessage...)
+		}
+		if len(rewrite.Diagnostics) > 0 && i < len(session.nativeBreakpoints) && len(session.nativeBreakpoints[i]) > 0 && !bytes.Equal(session.nativeBreakpoints[i], intent.Raw) {
+			continue
+		}
+
+		if !isEmptyBreakpointIntent(rewrite.Intent) {
+			refreshedIntent := rewrite.Intent
+			if len(refreshedIntent.Raw) == 0 {
+				refreshedIntent.Raw = append([]byte(nil), intent.Raw...)
+			}
+			session.breakpointIntents[i] = cloneBreakpointIntent(refreshedIntent)
+		}
+		session.setNativeBreakpointLocked(i, nativeMessage)
+	}
+}
+
+func (session *debugSession) refreshPendingBreakpoints(pending [][]byte) [][]byte {
+	if len(pending) == 0 {
+		return pending
+	}
+
+	refreshed := make([][]byte, len(pending))
+	session.breakpointsMu.Lock()
+	defer session.breakpointsMu.Unlock()
+
+	for i, message := range pending {
+		refreshed[i] = append([]byte(nil), message...)
+
+		intent := parseDebugBreakpointIntent(message)
+		if isEmptyBreakpointIntent(intent) {
+			continue
+		}
+
+		index := session.breakpointIndexLocked(intent)
+		if index < 0 || index >= len(session.nativeBreakpoints) || len(session.nativeBreakpoints[index]) == 0 {
+			continue
+		}
+		refreshed[i] = append([]byte(nil), session.nativeBreakpoints[index]...)
+	}
+	return refreshed
+}
+
+func (session *debugSession) breakpointIndexLocked(intent debugBreakpointIntent) int {
+	if intent.ID > 0 {
+		for i, existing := range session.breakpointIntents {
+			if existing.ID == intent.ID {
+				return i
+			}
+		}
+	}
+
+	for i, existing := range session.breakpointIntents {
+		if bytes.Equal(existing.Raw, intent.Raw) {
+			return i
+		}
+		if i < len(session.nativeBreakpoints) && bytes.Equal(session.nativeBreakpoints[i], intent.Raw) {
+			return i
+		}
+	}
+	return -1
+}
+
 func cloneBreakpointIntent(intent debugBreakpointIntent) debugBreakpointIntent {
 	intent.Raw = append([]byte(nil), intent.Raw...)
 	return intent
@@ -396,6 +536,7 @@ func (session *debugSession) attachNative(runner *Runner, native debugNativeSess
 		return false
 	}
 	oldNative := session.native
+	oldRunner := session.runner
 	session.runner = runner
 	session.native = native
 	pending := session.pending
@@ -425,7 +566,10 @@ func (session *debugSession) attachNative(runner *Runner, native debugNativeSess
 	}
 
 	// 2. 恢复之前的历史断点到新的 native 通道中
+	session.refreshNativeBreakpoints()
 	restoreBps := session.nativeBreakpointsSnapshot()
+	pending = session.refreshPendingBreakpoints(pending)
+	pauseOnAttach := session.consumeStepIntoFollow(runner, oldRunner)
 
 	for _, bpMessage := range restoreBps {
 		var bp struct {
@@ -445,6 +589,9 @@ func (session *debugSession) attachNative(runner *Runner, native debugNativeSess
 			return true
 		}
 	}
+	if pauseOnAttach {
+		session.dispatchInternalPause(native)
+	}
 	return true
 }
 
@@ -455,9 +602,24 @@ func (session *debugSession) prefersRunner(next *Runner, current *Runner) bool {
 		return false
 	}
 
+	if session.shouldFollowScript(nextScript) {
+		return true
+	}
+
 	nextMatches := session.shouldAttachScript(nextScript)
 	currentMatches := session.shouldAttachScript(currentScript)
 	return nextMatches && !currentMatches
+}
+
+func (session *debugSession) dispatchInternalPause(native debugNativeSession) {
+	if native == nil {
+		return
+	}
+	message := []byte(fmt.Sprintf(`{"id":%d,"method":"Debugger.pause"}`, debugInternalPauseRequestID))
+	session.markSimulated(debugInternalPauseRequestID)
+	if err := native.Dispatch(message); err != nil {
+		log.Warn("[V8 Debug] stepInto follow pause failed: %s", err.Error())
+	}
 }
 
 func runnerScript(runner *Runner) *Script {
@@ -604,7 +766,7 @@ func (session *debugSession) send(message []byte) {
 	var msg struct {
 		ID int `json:"id"`
 	}
-	if err := jsoniter.Unmarshal(message, &msg); err == nil && msg.ID > 0 {
+	if err := jsoniter.Unmarshal(message, &msg); err == nil && msg.ID != 0 {
 		session.simulatedMu.Lock()
 		if session.simulated[msg.ID] {
 			delete(session.simulated, msg.ID)

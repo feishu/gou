@@ -34,6 +34,30 @@ func (session *fakeDebugNativeSession) Close() error {
 	return nil
 }
 
+func debugBreakpointMessages(messages [][]byte) [][]byte {
+	breakpoints := [][]byte{}
+	for _, message := range messages {
+		if strings.Contains(string(message), `"method":"Debugger.setBreakpointByUrl"`) {
+			breakpoints = append(breakpoints, message)
+		}
+	}
+	return breakpoints
+}
+
+func debugBreakpointLineNumber(t *testing.T, message []byte) int {
+	t.Helper()
+
+	var parsed struct {
+		Params struct {
+			LineNumber int `json:"lineNumber"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(message, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	return parsed.Params.LineNumber
+}
+
 func TestDebugListReturnsRuntimeTargetByDefault(t *testing.T) {
 	manager := newDebugManager()
 	manager.enabled = true
@@ -661,6 +685,185 @@ func TestDebugRuntimeSessionSkipsScriptsWithoutMatchingBreakpoints(t *testing.T)
 	}
 	if target := manager.sessionTargetForScript(delayed); target != delayedTarget {
 		t.Fatalf("expected non-matching script to avoid runtime target, got %#v", target)
+	}
+}
+
+func TestDebugRuntimeSessionStepIntoFollowsScriptWithoutBreakpoint(t *testing.T) {
+	manager := newDebugManager()
+	manager.enabled = true
+	manager.host = "127.0.0.1"
+	manager.port = 9229
+
+	runtimeTarget := manager.registry.runtimeTarget
+	session, err := runtimeTarget.openSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = session.Close()
+		manager.stop()
+	})
+
+	schedule := &Script{ID: "service.schedule", File: "/Users/test/scripts/schedule.ts"}
+	delayed := &Script{ID: "consumer.delayed_queue", File: "/Users/test/scripts/delayed_queue.ts"}
+	scheduleTarget := manager.ensureTarget(schedule)
+	delayedTarget := manager.ensureTarget(delayed)
+	scheduleTarget.flatSourceMap = &SourceMap{Sources: []string{"file:///Users/test/scripts/schedule.ts"}}
+	delayedTarget.flatSourceMap = &SourceMap{Sources: []string{"file:///Users/test/scripts/delayed_queue.ts"}}
+	session.breakpointIntents = []debugBreakpointIntent{
+		{
+			Method:     "Debugger.setBreakpointByUrl",
+			URL:        "file:///Users/test/scripts/schedule.ts",
+			LineNumber: 101,
+		},
+	}
+
+	if target := manager.sessionTargetForScript(delayed); target != delayedTarget {
+		t.Fatalf("expected non-matching script to avoid runtime target before stepInto, got %#v", target)
+	}
+
+	if !session.attachNative(&Runner{script: schedule}, &fakeDebugNativeSession{}) {
+		t.Fatal("expected schedule runner to attach")
+	}
+	if err := session.Dispatch([]byte(`{"id":88,"method":"Debugger.stepInto"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	if target := manager.sessionTargetForScript(delayed); target != runtimeTarget {
+		t.Fatalf("expected stepInto to follow next script through runtime target, got %#v", target)
+	}
+}
+
+func TestDebugRuntimeSessionStepIntoPausesFollowedScriptOnAttach(t *testing.T) {
+	manager := newDebugManager()
+	manager.enabled = true
+	manager.host = "127.0.0.1"
+	manager.port = 9229
+
+	runtimeTarget := manager.registry.runtimeTarget
+	session, err := runtimeTarget.openSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = session.Close()
+		manager.stop()
+	})
+
+	schedule := &Script{ID: "service.schedule", File: "/Users/test/scripts/schedule.ts"}
+	delayed := &Script{ID: "consumer.delayed_queue", File: "/Users/test/scripts/delayed_queue.ts"}
+	manager.ensureTarget(schedule).flatSourceMap = &SourceMap{Sources: []string{"file:///Users/test/scripts/schedule.ts"}}
+	manager.ensureTarget(delayed).flatSourceMap = &SourceMap{Sources: []string{"file:///Users/test/scripts/delayed_queue.ts"}}
+	session.breakpointIntents = []debugBreakpointIntent{
+		{
+			Method:     "Debugger.setBreakpointByUrl",
+			URL:        "file:///Users/test/scripts/schedule.ts",
+			LineNumber: 101,
+		},
+	}
+
+	if !session.attachNative(&Runner{script: schedule}, &fakeDebugNativeSession{}) {
+		t.Fatal("expected schedule runner to attach")
+	}
+	if err := session.Dispatch([]byte(`{"id":89,"method":"Debugger.stepInto"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	dispatched := [][]byte{}
+	delayedNative := &fakeDebugNativeSession{
+		dispatch: func(message []byte) error {
+			dispatched = append(dispatched, append([]byte(nil), message...))
+			return nil
+		},
+	}
+	if !session.attachNative(&Runner{script: delayed}, delayedNative) {
+		t.Fatal("expected stepInto followed runner to attach")
+	}
+
+	foundPause := false
+	for _, message := range dispatched {
+		if strings.Contains(string(message), `"method":"Debugger.pause"`) {
+			foundPause = true
+			break
+		}
+	}
+	if !foundPause {
+		t.Fatalf("expected followed script attach to request Debugger.pause, got %q", dispatched)
+	}
+}
+
+func TestDebugRuntimeSessionRewritesStoredBreakpointWhenScriptRegistersLater(t *testing.T) {
+	manager := newDebugManager()
+	manager.enabled = true
+	manager.host = "127.0.0.1"
+	manager.port = 9229
+
+	runtimeTarget := manager.registry.runtimeTarget
+	session, err := runtimeTarget.openSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = session.Close()
+		manager.stop()
+	})
+
+	sourceFile := "/Users/test/scripts/service/consumer/consult.ts"
+	sourceURL := "file:///Users/test/scripts/service/consumer/consult.ts"
+	message := []byte(`{"id":42,"method":"Debugger.setBreakpointByUrl","params":{"lineNumber":1,"columnNumber":0,"url":"` + sourceURL + `"}}`)
+	if err := session.Dispatch(message); err != nil {
+		t.Fatal(err)
+	}
+
+	nativeBeforeRegister := session.nativeBreakpointsSnapshot()
+	if len(nativeBeforeRegister) != 1 {
+		t.Fatalf("expected one stored native breakpoint, got %d", len(nativeBeforeRegister))
+	}
+	if got := debugBreakpointLineNumber(t, nativeBeforeRegister[0]); got != 1 {
+		t.Fatalf("expected unresolved breakpoint line 1 before script registration, got %d", got)
+	}
+
+	session.mu.Lock()
+	pendingBeforeAttach := append([][]byte(nil), session.pending...)
+	session.mu.Unlock()
+	if len(pendingBeforeAttach) != 1 {
+		t.Fatalf("expected one pending breakpoint before attach, got %d", len(pendingBeforeAttach))
+	}
+	if got := debugBreakpointLineNumber(t, pendingBeforeAttach[0]); got != 1 {
+		t.Fatalf("expected pending breakpoint line 1 before attach, got %d", got)
+	}
+
+	consult := &Script{ID: "scripts.service.consumer.consult", File: sourceFile}
+	consultTarget := manager.ensureTarget(consult)
+	consultTarget.flatSourceMap = &SourceMap{
+		Version:  3,
+		Sources:  []string{sourceFile},
+		Mappings: ";;;;;" + "AACA",
+	}
+
+	if target := manager.sessionTargetForScript(consult); target != runtimeTarget {
+		t.Fatalf("expected runtime target to be selected for consult breakpoint, got %#v", target)
+	}
+
+	var dispatched [][]byte
+	native := &fakeDebugNativeSession{
+		dispatch: func(message []byte) error {
+			dispatched = append(dispatched, append([]byte(nil), message...))
+			return nil
+		},
+	}
+	if !session.attachNative(&Runner{script: consult}, native) {
+		t.Fatal("expected consult runner native session to attach")
+	}
+
+	breakpoints := debugBreakpointMessages(dispatched)
+	if len(breakpoints) != 2 {
+		t.Fatalf("expected restored and pending breakpoint dispatches, got %d breakpoint messages out of %d total", len(breakpoints), len(dispatched))
+	}
+	for i, breakpoint := range breakpoints {
+		if got := debugBreakpointLineNumber(t, breakpoint); got != 5 {
+			t.Fatalf("expected restored breakpoint %d to be rewritten to compiled line 5, got %d; message=%s", i, got, breakpoint)
+		}
 	}
 }
 
