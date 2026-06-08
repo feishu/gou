@@ -232,7 +232,7 @@ func parseSourceMaps(file string) (*sourceMapIndex, error) {
 }
 
 // debugFlatSourceMap 返回展平后的标准 v3 Source Map。
-func debugFlatSourceMap(script *Script) (*SourceMap, error) {
+func debugFlatSourceMap(script *Script, exposeSourceContent bool) (*SourceMap, error) {
 	if script == nil || script.File == "" {
 		return nil, nil
 	}
@@ -263,7 +263,7 @@ func debugFlatSourceMap(script *Script) (*SourceMap, error) {
 				}
 				sections = append(sections, debugSourceMapSection{
 					Offset: offset,
-					Map:    debugSourceMap(sm, imp.Path),
+					Map:    debugSourceMap(sm, imp.Path, exposeSourceContent),
 				})
 
 				importCode := fmt.Sprintf("%s;const %s = %s;", module.Source, imp.Name, module.GlobalName)
@@ -285,7 +285,7 @@ func debugFlatSourceMap(script *Script) (*SourceMap, error) {
 	}
 	sections = append(sections, debugSourceMapSection{
 		Offset: offset,
-		Map:    debugSourceMap(sm, script.File),
+		Map:    debugSourceMap(sm, script.File, exposeSourceContent),
 	})
 
 	indexed := &debugIndexedSourceMap{
@@ -310,8 +310,8 @@ func debugFlatSourceMap(script *Script) (*SourceMap, error) {
 	return flat, err
 }
 
-func debugSourceMapBytes(script *Script) ([]byte, error) {
-	flat, err := debugFlatSourceMap(script)
+func debugSourceMapBytes(script *Script, exposeSourceContent bool) ([]byte, error) {
+	flat, err := debugFlatSourceMap(script, exposeSourceContent)
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +321,7 @@ func debugSourceMapBytes(script *Script) ([]byte, error) {
 	return jsoniter.Marshal(flat)
 }
 
-func debugSourceMap(sm *SourceMap, fallbackFile string) *SourceMap {
+func debugSourceMap(sm *SourceMap, fallbackFile string, exposeSourceContent bool) *SourceMap {
 	if sm == nil {
 		return nil
 	}
@@ -338,12 +338,15 @@ func debugSourceMap(sm *SourceMap, fallbackFile string) *SourceMap {
 		sources[i] = debugSourceURL(sourcePaths[i])
 	}
 
-	sourcesContent := sm.SourcesContent
-	if len(sourcesContent) == 0 && len(sources) > 0 {
-		sourcesContent = make([]string, len(sources))
-		for i, sourcePath := range sourcePaths {
-			if content, err := os.ReadFile(sourcePath); err == nil {
-				sourcesContent[i] = string(content)
+	var sourcesContent []string
+	if exposeSourceContent {
+		sourcesContent = sm.SourcesContent
+		if len(sourcesContent) == 0 && len(sources) > 0 {
+			sourcesContent = make([]string, len(sources))
+			for i, sourcePath := range sourcePaths {
+				if content, err := os.ReadFile(sourcePath); err == nil {
+					sourcesContent[i] = string(content)
+				}
 			}
 		}
 	}

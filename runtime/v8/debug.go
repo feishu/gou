@@ -26,6 +26,7 @@ type debugManager struct {
 	enabled                  bool
 	host                     string
 	port                     int
+	policy                   debugTransportPolicy
 	server                   *http.Server
 	registry                 *debugRegistry
 	beforeDebugServerPublish func()
@@ -43,18 +44,32 @@ type debugTarget struct {
 	beforeSessionPublish func()
 }
 
-var cdpLogFile *os.File
+var (
+	cdpLogMu   sync.Mutex
+	cdpLogFile *os.File
+)
 
-func init() {
-	f, err := os.OpenFile("/tmp/cdp_trace.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
-	if err == nil {
-		cdpLogFile = f
+func logCDP(direction string, msg []byte) {
+	cdpLogMu.Lock()
+	defer cdpLogMu.Unlock()
+	if cdpLogFile != nil {
+		_, _ = cdpLogFile.WriteString(direction + ": " + string(msg) + "\n")
 	}
 }
 
-func logCDP(direction string, msg []byte) {
+func configureCDPTrace(policy debugTransportPolicy) {
+	cdpLogMu.Lock()
+	defer cdpLogMu.Unlock()
 	if cdpLogFile != nil {
-		cdpLogFile.WriteString(direction + ": " + string(msg) + "\n")
+		_ = cdpLogFile.Close()
+		cdpLogFile = nil
+	}
+	if !policy.Trace.Enabled || policy.Trace.Path == "" {
+		return
+	}
+	f, err := os.OpenFile(policy.Trace.Path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+	if err == nil {
+		cdpLogFile = f
 	}
 }
 
@@ -73,7 +88,8 @@ const debugRuntimeTargetID = "runtime"
 var v8Debug = newDebugManager()
 
 func newDebugManager() *debugManager {
-	manager := &debugManager{}
+	policy := currentDebugTransportPolicy(Inspect{})
+	manager := &debugManager{host: policy.Host, port: policy.Port, policy: policy}
 	manager.registry = newDebugRegistry("127.0.0.1", 9229)
 	manager.registry.manager = manager
 	return manager
@@ -92,14 +108,9 @@ func (manager *debugManager) start(inspect Inspect) error {
 		return nil
 	}
 
-	host := inspect.Host
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	port := inspect.Port
-	if port == 0 {
-		port = 9229
-	}
+	policy := currentDebugTransportPolicy(inspect)
+	host := policy.Host
+	port := policy.Port
 
 	manager.mu.Lock()
 	if manager.enabled {
@@ -110,9 +121,11 @@ func (manager *debugManager) start(inspect Inspect) error {
 	manager.enabled = true
 	manager.host = host
 	manager.port = port
+	manager.policy = policy
 	manager.registry = registry
 	manager.registry.manager = manager
 	manager.mu.Unlock()
+	configureCDPTrace(policy)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/json", manager.handleList)
@@ -215,6 +228,12 @@ func (manager *debugManager) activeRegistry() *debugRegistry {
 		return nil
 	}
 	return manager.registry
+}
+
+func (manager *debugManager) currentPolicy() debugTransportPolicy {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	return manager.policy
 }
 
 func (manager *debugManager) registerScript(script *Script) {
@@ -403,7 +422,8 @@ func (manager *debugManager) handleWebSocket(w http.ResponseWriter, r *http.Requ
 	}
 	defer session.Close()
 
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	policy := manager.currentPolicy()
+	upgrader := websocket.Upgrader{CheckOrigin: policy.CheckOrigin}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -447,7 +467,7 @@ func (manager *debugManager) handleSourceMap(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	data, err := debugSourceMapBytes(target.script)
+	data, err := debugSourceMapBytes(target.script, manager.currentPolicy().ExposeSourceContent)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

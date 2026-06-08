@@ -85,6 +85,16 @@ func (registry *debugRegistry) isActive() bool {
 	return registry.active
 }
 
+func (registry *debugRegistry) currentPolicy() debugTransportPolicy {
+	if registry == nil {
+		return currentDebugTransportPolicy(Inspect{})
+	}
+	if registry.manager != nil {
+		return registry.manager.currentPolicy()
+	}
+	return currentDebugTransportPolicy(Inspect{Host: registry.host, Port: registry.port})
+}
+
 func (registry *debugRegistry) sessionTargetForScript(script *Script) *debugTarget {
 	if registry == nil || script == nil {
 		return nil
@@ -131,6 +141,7 @@ func (registry *debugRegistry) openSession(target *debugTarget) (*debugSession, 
 		return nil, fmt.Errorf("debug target is inactive")
 	}
 
+	replaceSession := registry.currentPolicy().ReplaceSession
 	var oldSession *debugSession
 	registry.mu.Lock()
 	if !registry.active {
@@ -149,6 +160,11 @@ func (registry *debugRegistry) openSession(target *debugTarget) (*debugSession, 
 	}
 
 	oldSession = target.session
+	if oldSession != nil && !replaceSession {
+		target.mu.Unlock()
+		registry.mu.Unlock()
+		return nil, fmt.Errorf("debug target already has an active session")
+	}
 	session := &debugSession{
 		id:                target.id,
 		target:            target,
@@ -370,7 +386,7 @@ func (target *debugTarget) getFlatSourceMap() *SourceMap {
 		return nil
 	}
 	target.flatSourceMapOnce.Do(func() {
-		sm, err := debugFlatSourceMap(target.script)
+		sm, err := debugFlatSourceMap(target.script, target.registry.currentPolicy().ExposeSourceContent)
 		if err == nil {
 			target.flatSourceMap = sm
 		}
