@@ -32,9 +32,24 @@ type Path struct {
 	Method         string        `json:"method"`
 	Process        string        `json:"process"`
 	Guard          string        `json:"guard,omitempty"`
+	SSE            *SSEConfig    `json:"sse,omitempty"`
 	In             []interface{} `json:"in,omitempty"`
 	Out            Out           `json:"out,omitempty"`
 	ProcessHandler bool          `json:"processHandler,omitempty"`
+}
+
+// SSEConfig SSE 配置
+type SSEConfig struct {
+	Type      string       `json:"type,omitempty"`
+	Adapter   string       `json:"adapter,omitempty"`
+	Heartbeat int          `json:"heartbeat,omitempty"`
+	Bus       SSEBusConfig `json:"bus,omitempty"`
+}
+
+// SSEBusConfig SSE 消息总线配置
+type SSEBusConfig struct {
+	Connector string `json:"connector,omitempty"`
+	Channel   string `json:"channel,omitempty"`
 }
 
 // Out http 输出
