@@ -32,6 +32,7 @@ type Runner struct {
 	status     uint8
 	closed     bool
 	dispatcher *Dispatcher
+	execution  *runnerExecutionLifecycle
 	signal     chan uint8
 	destroyed  chan struct{}
 	chResp     chan interface{}
@@ -85,6 +86,7 @@ func NewRunner(keepalive bool, owner *Dispatcher) *Runner {
 		iso:        nil,
 		ctx:        nil,
 		dispatcher: owner,
+		execution:  newRunnerExecutionLifecycle(),
 		signal:     make(chan uint8, 2),
 		destroyed:  make(chan struct{}),
 		keepalive:  keepalive,
@@ -245,6 +247,15 @@ func (runner *Runner) ExecInvocation(inv runnerInvocation) interface{} {
 	}
 }
 
+func (runner *Runner) retireCurrentExecution() {
+	if runner == nil {
+		return
+	}
+	runner.execution.retire()
+	runner.Destroy(nil)
+	runner.terminateExecution()
+}
+
 // Context get the context
 func (runner *Runner) Context() (*v8go.Context, error) {
 	runner.mu.Lock()
@@ -256,7 +267,7 @@ func (runner *Runner) exec() {
 
 	defer func() {
 		go func() {
-			if runner.isClosed() {
+			if runner.isClosed() || !runner.execution.reusable() {
 				return
 			}
 			status, keepalive := runner.snapshot()
@@ -278,12 +289,18 @@ func (runner *Runner) exec() {
 }
 
 func (runner *Runner) _exec() {
+	releaseExecution := runner.execution.acquire()
+	defer releaseExecution()
+
 	runner.mu.Lock()
 	inv := runner.invocation
 	iso := runner.iso
 	ctx := runner.ctx
 	inspector := runner.inspector
 	runner.mu.Unlock()
+
+	unbindGoContext := bridge.BindGoContext(ctx, inv.ctx)
+	defer unbindGoContext()
 
 	scriptTarget := v8Debug.targetForScript(inv.script)
 	sessionTarget := v8Debug.sessionTargetForScript(inv.script)
@@ -386,6 +403,8 @@ func (runner *Runner) destroy() {
 	runner.tmpl = nil
 	runner.mu.Unlock()
 
+	runner.execution.waitInactive()
+
 	log.Debug(fmt.Sprintf("4.  [%s] destroy the runner. status:%d, keepalive:%v ", runner.id, RunnerStatusDestroy, keepalive))
 	log.Debug(fmt.Sprintf("--- [%s] end -----------------", runner.id))
 
@@ -431,6 +450,8 @@ func (runner *Runner) reset() {
 	lease := runner.debugLease
 	runner.debugLease = nil
 	runner.mu.Unlock()
+
+	runner.execution.waitInactive()
 
 	if lease != nil {
 		lease.Close()

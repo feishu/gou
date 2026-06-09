@@ -81,17 +81,32 @@ func JsError(ctx *v8go.Context, err interface{}) *v8go.Value {
 	}
 
 	global := ctx.Global()
-	errorObj, _ := global.Get("Error")
-	if errorObj.IsFunction() {
-		fn, _ := errorObj.AsFunction()
-		m, _ := v8go.NewValue(ctx.Isolate(), message)
-		v, _ := fn.Call(global, m)
-		return v
+	if global != nil {
+		errorObj, err := global.Get("Error")
+		if err == nil && errorObj != nil && errorObj.IsFunction() {
+			fn, err := errorObj.AsFunction()
+			if err == nil {
+				m, err := v8go.NewValue(ctx.Isolate(), message)
+				if err == nil {
+					v, err := fn.Call(global, m)
+					if err == nil && v != nil {
+						return v
+					}
+				}
+			}
+		}
 	}
 
 	tmpl := v8go.NewObjectTemplate(ctx.Isolate())
-	inst, _ := tmpl.NewInstance(ctx)
-	inst.Set("message", message)
+	inst, err := tmpl.NewInstance(ctx)
+	if err != nil || inst == nil {
+		v, err := v8go.NewValue(ctx.Isolate(), message)
+		if err == nil && v != nil {
+			return v
+		}
+		return v8go.Undefined(ctx.Isolate())
+	}
+	_ = inst.Set("message", message)
 	return inst.Value
 }
 

@@ -39,10 +39,20 @@ func exec(info *v8go.FunctionCallbackInfo) *v8go.Value {
 		}
 	}
 
-	goRes, err := process.New(jsArgs[0].String(), goArgs...).
+	proc := process.New(jsArgs[0].String(), goArgs...).
 		WithGlobal(share.Global).
-		WithSID(share.Sid).
-		Exec()
+		WithSID(share.Sid)
+
+	var goRes interface{}
+	if goctx := bridge.GoContext(info.Context()); goctx != nil {
+		err = proc.WithContext(goctx).Execute()
+		if err == nil {
+			goRes = proc.Value()
+			proc.Release()
+		}
+	} else {
+		goRes, err = proc.Exec()
+	}
 
 	if err != nil {
 		return bridge.JsException(info.Context(), err)

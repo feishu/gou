@@ -1,6 +1,7 @@
 package v8
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -97,6 +98,7 @@ type Script struct {
 }
 
 type runnerInvocation struct {
+	ctx    context.Context
 	script *Script
 	method string
 	args   []interface{}

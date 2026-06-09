@@ -31,6 +31,43 @@ func call(ctx *v8go.Context, method string, args ...interface{}) (interface{}, e
 	return goRes, nil
 }
 
+func TestJsErrorFallsBackWhenGlobalErrorLookupFails(t *testing.T) {
+	iso := v8go.NewIsolate()
+	defer iso.Dispose()
+
+	ctx := v8go.NewContext(iso)
+	defer ctx.Close()
+
+	_, err := ctx.RunScript(`
+		Object.defineProperty(globalThis, "Error", {
+			configurable: true,
+			get() { throw "error constructor failure"; },
+		});
+	`, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jsErr := JsError(ctx, "fallback message")
+	if jsErr == nil {
+		t.Fatal("expected fallback error value")
+	}
+
+	obj, err := jsErr.AsObject()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	message, err := obj.Get("message")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if message.String() != "fallback message" {
+		t.Fatalf("expected fallback message, got %q", message.String())
+	}
+}
+
 func prepare(t *testing.T) *v8go.Context {
 
 	root := os.Getenv("GOU_TEST_APPLICATION")

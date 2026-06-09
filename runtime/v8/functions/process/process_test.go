@@ -87,6 +87,54 @@ func TestProcessWithData(t *testing.T) {
 	assert.Equal(t, []interface{}{"foo", float64(99), 0.618}, res["Args"])
 }
 
+func TestProcessReturnsExceptionWhenErrorGlobalGetterFails(t *testing.T) {
+	ctx := prepare(t, false, "", nil)
+	defer close(ctx)
+
+	jsRes, err := ctx.RunScript(`
+		Object.defineProperty(globalThis, "__yao_data", {
+			configurable: true,
+			get() { throw "share data failure"; },
+		});
+		Object.defineProperty(globalThis, "Error", {
+			configurable: true,
+			get() { throw "error constructor failure"; },
+		});
+
+		let caught;
+		try {
+			Process("unit.test.process");
+		} catch (err) {
+			caught = err;
+		}
+		caught && caught.message;
+	`, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.Equal(t, "share data failure", jsRes.String())
+}
+
+func TestProcessWithoutBoundContextKeepsExecBehavior(t *testing.T) {
+	ctx := prepare(t, false, "", nil)
+	defer close(ctx)
+
+	process.Register("unit.test.no-bound-context", func(process *process.Process) interface{} {
+		if process.Context != nil {
+			return "unexpected context"
+		}
+		return "exec"
+	})
+
+	jsRes, err := ctx.RunScript(`Process("unit.test.no-bound-context")`, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.Equal(t, "exec", jsRes.String())
+}
+
 func close(ctx *v8go.Context) {
 	ctx.Isolate().Dispose()
 }

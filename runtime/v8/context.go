@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/fatih/color"
 	"github.com/google/uuid"
@@ -138,6 +137,7 @@ func (context *Context) CallWith(ctx context.Context, method string, args ...int
 
 	// Performance Mode
 	if runner, inv := context.runnerInvocation(method, args); runner != nil {
+		inv.ctx = ctx
 		done := make(chan interface{}, 1)
 		go func() {
 			done <- runner.ExecInvocation(inv)
@@ -148,13 +148,13 @@ func (context *Context) CallWith(ctx context.Context, method string, args ...int
 			return runnerCallResult(res)
 
 		case <-ctx.Done():
-			runner.Destroy(nil)
-			runner.terminateExecution()
-			<-done
-			runner.waitDestroyed(time.Second)
+			runner.retireCurrentExecution()
 			return nil, ctx.Err()
 		}
 	}
+
+	unbindGoContext := bridge.BindGoContext(context.Context, ctx)
+	defer unbindGoContext()
 
 	// Set the global data
 	global := context.Global()

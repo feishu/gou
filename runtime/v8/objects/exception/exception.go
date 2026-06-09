@@ -58,27 +58,29 @@ func (e *Exception) ExportFunction(iso *v8go.Isolate) *v8go.FunctionTemplate {
 		}
 
 		global := info.Context().Global()
-		errorObj, _ := global.Get("Error")
-		if errorObj.IsFunction() {
-			fn, err := errorObj.AsFunction()
-			if err != nil {
-				log.Error("Exception: %s", err.Error())
-			}
+		if global != nil {
+			errorObj, err := global.Get("Error")
+			if err == nil && errorObj != nil && errorObj.IsFunction() {
+				fn, err := errorObj.AsFunction()
+				if err != nil {
+					log.Error("Exception: %s", err.Error())
+				}
 
-			v, err := fn.Call(v8go.Undefined(ctx.Isolate()), message)
-			if err != nil {
-				log.Error("Exception: %s", err.Error())
-			}
+				v, err := fn.Call(v8go.Undefined(ctx.Isolate()), message)
+				if err != nil {
+					log.Error("Exception: %s", err.Error())
+				}
 
-			obj, err := v.AsObject()
-			if err != nil {
-				log.Error("Exception: %s", err.Error())
-			}
+				obj, err := v.AsObject()
+				if err != nil {
+					log.Error("Exception: %s", err.Error())
+				}
 
-			// extend error object
-			obj.Set("code", code)
-			obj.Set("name", fmt.Sprintf("Exception|%v", code))
-			return obj.Value
+				// extend error object
+				obj.Set("code", code)
+				obj.Set("name", fmt.Sprintf("Exception|%v", code))
+				return obj.Value
+			}
 		}
 
 		object := e.ExportObject(iso)

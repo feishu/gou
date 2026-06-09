@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yaoapp/gou/process"
+	"github.com/yaoapp/gou/runtime/v8/bridge"
 	"rogchap.com/v8go"
 )
 
@@ -250,6 +252,205 @@ func TestCallWithPerformanceTimeoutDestroysRunner(t *testing.T) {
 	}
 	if res != 42 {
 		t.Fatalf("expected 42, got %#v", res)
+	}
+}
+
+type blockingCallbackCall struct {
+	v8ctx  *Context
+	block  chan struct{}
+	result chan error
+	once   chan struct{}
+}
+
+func startBlockingCallbackCallWithTimeout(t *testing.T, scriptID string) blockingCallbackCall {
+	t.Helper()
+
+	block := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	released := make(chan struct{})
+
+	script := &Script{
+		ID:   scriptID,
+		File: scriptID + ".js",
+		Source: `
+function Run() {
+	blockingCallback()
+	return true
+}
+`,
+	}
+
+	v8ctx, err := script.NewContext("", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v8ctx.WithFunction("blockingCallback", func(info *v8go.FunctionCallbackInfo) *v8go.Value {
+		entered <- struct{}{}
+		<-block
+		return bridge.JsException(info.Context(), errors.New("blocking callback released after timeout"))
+	})
+
+	result := make(chan error, 1)
+	go func() {
+		cancelCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		_, err := v8ctx.CallWith(cancelCtx, "Run")
+		result <- err
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		close(block)
+		t.Fatal("blocking process was not entered")
+	}
+
+	return blockingCallbackCall{v8ctx: v8ctx, block: block, result: result, once: released}
+}
+
+func (call blockingCallbackCall) release() {
+	select {
+	case <-call.once:
+	default:
+		close(call.once)
+		close(call.block)
+	}
+}
+
+func TestCallWithTimeoutDuringBlockingGoCallbackReturnsWithoutClosingContext(t *testing.T) {
+	option := option()
+	option.Mode = "performance"
+	option.MinSize = 1
+	option.MaxSize = 1
+	option.DefaultTimeout = 500
+	option.HeapSizeLimit = 4294967296
+
+	prepareSetup(t, option)
+	defer cleanupDispatcherForTest(t)
+
+	call := startBlockingCallbackCallWithTimeout(t, "unit.blocking.runner.timeout")
+	defer call.release()
+
+	select {
+	case err := <-call.result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected deadline error, got %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		call.release()
+		err := <-call.result
+		t.Fatalf("CallWith did not return before blocking callback completed; final error: %v", err)
+	}
+
+	stats := dispatcher.Stats()
+	if stats.Idle != 0 {
+		t.Fatalf("timed out runner returned to idle pool while callback is still blocked: %+v", stats)
+	}
+	if stats.Active != 1 {
+		t.Fatalf("timed out runner should stay active until callback exits, got %+v", stats)
+	}
+
+	call.release()
+	waitForDispatcherStats(t, func(stats DispatcherStats) bool {
+		return stats.Destroyed == 1 && stats.Active == 0 && stats.Idle == 0
+	})
+}
+
+func TestTimedOutRunnerIsNotReusedBeforeBlockingCallbackReturns(t *testing.T) {
+	option := option()
+	option.Mode = "performance"
+	option.MinSize = 1
+	option.MaxSize = 1
+	option.DefaultTimeout = 50
+	option.HeapSizeLimit = 4294967296
+
+	prepareSetup(t, option)
+	defer cleanupDispatcherForTest(t)
+
+	call := startBlockingCallbackCallWithTimeout(t, "unit.blocking.runner.reuse")
+	defer call.release()
+
+	select {
+	case err := <-call.result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected deadline error, got %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		call.release()
+		err := <-call.result
+		t.Fatalf("CallWith did not return before reuse check; final error: %v", err)
+	}
+
+	next := &Script{
+		ID:     "unit.blocking.runner.reuse.next",
+		File:   "unit.blocking.runner.reuse.next.js",
+		Source: "function Run() { return 42 }",
+	}
+	nextCtx, err := next.NewContext("", nil)
+	if err == nil {
+		nextCtx.Close()
+		t.Fatal("expected new context to wait or time out while timed out runner callback is still blocked")
+	}
+
+	call.release()
+	waitForDispatcherStats(t, func(stats DispatcherStats) bool {
+		return stats.Destroyed == 1 && stats.Active == 0 && stats.Idle == 0
+	})
+}
+
+func TestProcessReceivesCallWithCancellation(t *testing.T) {
+	option := option()
+	option.Mode = "performance"
+	option.MinSize = 1
+	option.MaxSize = 1
+	option.DefaultTimeout = 500
+	option.HeapSizeLimit = 4294967296
+
+	prepareSetup(t, option)
+	defer cleanupDispatcherForTest(t)
+
+	observed := make(chan error, 1)
+	process.Register("unit.contextaware", func(p *process.Process) interface{} {
+		if p.Context == nil {
+			observed <- errors.New("missing process context")
+			return nil
+		}
+		<-p.Context.Done()
+		observed <- p.Context.Err()
+		return nil
+	})
+
+	script := &Script{
+		ID:   "unit.contextaware",
+		File: "unit.contextaware.js",
+		Source: `
+function Run() {
+	Process("unit.contextaware")
+	return true
+}
+`,
+	}
+
+	v8ctx, err := script.NewContext("", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err = v8ctx.CallWith(cancelCtx, "Run")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline error, got %v", err)
+	}
+
+	select {
+	case err := <-observed:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected process to observe deadline, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("process did not observe CallWith cancellation")
 	}
 }
 
