@@ -39,6 +39,12 @@ type Health struct {
 // initialize when the v8 start
 var dispatcher *Dispatcher = nil
 
+var startRunnerForDispatcher = func(runner *Runner, ready chan error) {
+	go runner.Start(ready)
+}
+
+const dispatcherCreateFailureBackoff = 10 * time.Millisecond
+
 // NewDispatcher is a runner dispatcher
 func NewDispatcher(min, max uint) *Dispatcher {
 
@@ -65,6 +71,10 @@ func (dispatcher *Dispatcher) Stats() DispatcherStats {
 	stats := dispatcher.stats
 	stats.Active = uint64(dispatcher.total)
 	stats.Idle = uint64(len(dispatcher.availables))
+	stats.Min = uint64(dispatcher.min)
+	stats.Max = uint64(dispatcher.max)
+	stats.Missing = uint64(dispatcher.health.missing)
+	stats.Selects = uint64(dispatcher.health.total)
 	if stats.Active >= stats.Idle {
 		stats.Leased = stats.Active - stats.Idle
 	} else {
@@ -192,7 +202,7 @@ func (dispatcher *Dispatcher) createWithTimeout(timeout time.Duration) error {
 	runner := NewRunner(true, dispatcher)
 	ready := make(chan error, 1)
 
-	go runner.Start(ready)
+	startRunnerForDispatcher(runner, ready)
 	select {
 	case err := <-ready:
 		if err != nil {
@@ -247,8 +257,23 @@ func (dispatcher *Dispatcher) destroyCreatedRunner(runner *Runner, ready <-chan 
 	}
 }
 
-func dispatcherSelectTimeout(timeout time.Duration) error {
-	return fmt.Errorf("[dispatcher] select timeout %v", timeout)
+func (dispatcher *Dispatcher) selectTimeoutError(timeout time.Duration) error {
+	stats := dispatcher.Stats()
+	return fmt.Errorf(
+		"[dispatcher] select timeout %v active:%d idle:%d leased:%d min:%d max:%d created:%d destroyed:%d timeouts:%d health_evictions:%d missing:%d selects:%d",
+		timeout,
+		stats.Active,
+		stats.Idle,
+		stats.Leased,
+		stats.Min,
+		stats.Max,
+		stats.Created,
+		stats.Destroyed,
+		stats.Timeouts,
+		stats.HealthEvictions,
+		stats.Missing,
+		stats.Selects,
+	)
 }
 
 // Select select a free v8 runner
@@ -266,7 +291,7 @@ func (dispatcher *Dispatcher) Select(timeout time.Duration) (*Runner, error) {
 	for {
 		if time.Until(deadline) <= 0 {
 			dispatcher.timeoutCount()
-			return nil, dispatcherSelectTimeout(timeout)
+			return nil, dispatcher.selectTimeoutError(timeout)
 		}
 
 		runner, err := dispatcher.tryTakeAvailable()
@@ -290,7 +315,7 @@ func (dispatcher *Dispatcher) Select(timeout time.Duration) (*Runner, error) {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				dispatcher.timeoutCount()
-				return nil, dispatcherSelectTimeout(timeout)
+				return nil, dispatcher.selectTimeoutError(timeout)
 			}
 			dispatcher.missingCount()
 			if err := dispatcher.createWithTimeout(remaining); err != nil {
@@ -299,7 +324,11 @@ func (dispatcher *Dispatcher) Select(timeout time.Duration) (*Runner, error) {
 				}
 				if time.Until(deadline) <= 0 {
 					dispatcher.timeoutCount()
-					return nil, dispatcherSelectTimeout(timeout)
+					return nil, dispatcher.selectTimeoutError(timeout)
+				}
+				runner, err, done := dispatcher.waitAfterCreateFailure(timeout, deadline, timer)
+				if done {
+					return runner, err
 				}
 			}
 			continue
@@ -318,7 +347,7 @@ func (dispatcher *Dispatcher) Select(timeout time.Duration) (*Runner, error) {
 
 		case <-timer.C:
 			dispatcher.timeoutCount()
-			return nil, dispatcherSelectTimeout(timeout)
+			return nil, dispatcher.selectTimeoutError(timeout)
 
 		case <-recheck.C:
 			continue
@@ -331,6 +360,44 @@ func (dispatcher *Dispatcher) Select(timeout time.Duration) (*Runner, error) {
 		}
 	}
 
+}
+
+func (dispatcher *Dispatcher) waitAfterCreateFailure(timeout time.Duration, deadline time.Time, timer *time.Timer) (*Runner, error, bool) {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		dispatcher.timeoutCount()
+		return nil, dispatcher.selectTimeoutError(timeout), true
+	}
+
+	wait := dispatcherCreateFailureBackoff
+	if remaining < wait {
+		wait = remaining
+	}
+
+	backoff := time.NewTimer(wait)
+	defer backoff.Stop()
+
+	select {
+	case runner := <-dispatcher.availables:
+		if err := dispatcher.claimRunner(runner); err != nil {
+			if runner != nil {
+				runner.Destroy(nil)
+			}
+			return nil, err, true
+		}
+		dispatcher.logSelectedRunner(runner)
+		return runner, nil, true
+
+	case <-timer.C:
+		dispatcher.timeoutCount()
+		return nil, dispatcher.selectTimeoutError(timeout), true
+
+	case <-backoff.C:
+		return nil, nil, false
+
+	case <-dispatcher.stop:
+		return nil, dispatcher.stateError(), true
+	}
 }
 
 // Scaling scale the v8 runners, check every 10 seconds

@@ -1,7 +1,10 @@
 package v8
 
 import (
+	"errors"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -217,6 +220,53 @@ func TestDispatcherSelectCreatesAfterDestroyedRunnerFreesCapacity(t *testing.T) 
 
 	case <-time.After(time.Second):
 		t.Fatal("Select did not create a replacement runner after capacity was freed")
+	}
+}
+
+func TestDispatcherSelectBacksOffAfterCreateFailure(t *testing.T) {
+	dispatcher := NewDispatcher(0, 100)
+	originalStartRunner := startRunnerForDispatcher
+	var attempts int64
+	startRunnerForDispatcher = func(runner *Runner, ready chan error) {
+		atomic.AddInt64(&attempts, 1)
+		ready <- errors.New("synthetic runner start failure")
+	}
+	defer func() { startRunnerForDispatcher = originalStartRunner }()
+
+	runner, err := dispatcher.Select(35 * time.Millisecond)
+	if runner != nil {
+		runner.Destroy(nil)
+		t.Fatalf("expected no runner after synthetic start failures, got %s", runner.id)
+	}
+	if err == nil {
+		t.Fatal("expected Select to return an error")
+	}
+
+	if got := atomic.LoadInt64(&attempts); got > 5 {
+		t.Fatalf("create attempts = %d, want at most 5 within 35ms timeout", got)
+	}
+}
+
+func TestDispatcherSelectTimeoutIncludesStats(t *testing.T) {
+	dispatcher := NewDispatcher(0, 1)
+	dispatcher.mu.Lock()
+	dispatcher.total = 1
+	dispatcher.mu.Unlock()
+
+	runner, err := dispatcher.Select(5 * time.Millisecond)
+	if runner != nil {
+		runner.Destroy(nil)
+		t.Fatalf("expected no runner, got %s", runner.id)
+	}
+	if err == nil {
+		t.Fatal("expected Select to timeout")
+	}
+
+	message := err.Error()
+	for _, want := range []string{"select timeout", "active:1", "idle:0", "leased:1", "max:1"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("expected timeout error to contain %q, got %q", want, message)
+		}
 	}
 }
 

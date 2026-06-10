@@ -23,10 +23,14 @@ type DispatcherStats struct {
 	Active          uint64
 	Idle            uint64
 	Leased          uint64
+	Min             uint64
+	Max             uint64
 	Created         uint64
 	Destroyed       uint64
 	Timeouts        uint64
 	HealthEvictions uint64
+	Missing         uint64
+	Selects         uint64
 }
 
 type StandardCompatStats struct {
