@@ -223,6 +223,139 @@ func TestDispatcherSelectCreatesAfterDestroyedRunnerFreesCapacity(t *testing.T) 
 	}
 }
 
+func TestDispatcherScaleOnceShrinksIdleRunnersToMin(t *testing.T) {
+	option := option()
+	option.Mode = "performance"
+	option.MinSize = 1
+	option.MaxSize = 4
+	option.DefaultTimeout = 500
+	option.HeapSizeLimit = 4294967296
+
+	prepareSetup(t, option)
+	defer cleanupDispatcherForTest(t)
+
+	leased := []*Runner{}
+	for i := uint(0); i < option.MaxSize; i++ {
+		runner, err := dispatcher.Select(500 * time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		leased = append(leased, runner)
+	}
+
+	for _, runner := range leased {
+		if !dispatcher.release(runner, true) {
+			t.Fatalf("failed to release runner %s", runner.id)
+		}
+	}
+
+	stats := waitForDispatcherStats(t, func(stats DispatcherStats) bool {
+		return stats.Active == uint64(option.MaxSize) && stats.Idle == uint64(option.MaxSize)
+	})
+	if stats.Leased != 0 {
+		t.Fatalf("expected no leased runners before shrink, got %d", stats.Leased)
+	}
+
+	dispatcher.scaleOnce()
+
+	stats = waitForDispatcherStats(t, func(stats DispatcherStats) bool {
+		return stats.Active == uint64(option.MinSize) && stats.Idle == uint64(option.MinSize)
+	})
+	if stats.Destroyed != uint64(option.MaxSize-option.MinSize) {
+		t.Fatalf("expected %d destroyed runners, got %d", option.MaxSize-option.MinSize, stats.Destroyed)
+	}
+}
+
+func TestDispatcherScaleOnceIgnoresSmallSampleWindow(t *testing.T) {
+	dispatcher := NewDispatcher(1, 20)
+	originalStartRunner := startRunnerForDispatcher
+	startRunnerForDispatcher = func(runner *Runner, ready chan error) {
+		ready <- nil
+	}
+	defer func() {
+		startRunnerForDispatcher = originalStartRunner
+		for _, runner := range dispatcher.drainIdleRunners() {
+			runner.Destroy(nil)
+		}
+	}()
+
+	dispatcher.mu.Lock()
+	dispatcher.total = 1
+	dispatcher.health.missing = 1
+	dispatcher.health.total = 1
+	dispatcher.mu.Unlock()
+
+	dispatcher.scaleOnce()
+
+	stats := dispatcher.Stats()
+	if stats.Active != 1 {
+		t.Fatalf("expected small sample window to keep active runners at 1, got %d", stats.Active)
+	}
+	if stats.Created != 0 {
+		t.Fatalf("expected no runners created from small sample window, got %d", stats.Created)
+	}
+}
+
+func TestDispatcherScaleOnceGrowsGradually(t *testing.T) {
+	dispatcher := NewDispatcher(1, 20)
+	originalStartRunner := startRunnerForDispatcher
+	startRunnerForDispatcher = func(runner *Runner, ready chan error) {
+		ready <- nil
+	}
+	defer func() {
+		startRunnerForDispatcher = originalStartRunner
+		for _, runner := range dispatcher.drainIdleRunners() {
+			runner.Destroy(nil)
+		}
+	}()
+
+	dispatcher.mu.Lock()
+	dispatcher.total = 1
+	dispatcher.health.missing = 10
+	dispatcher.health.total = 20
+	dispatcher.mu.Unlock()
+
+	dispatcher.scaleOnce()
+
+	stats := dispatcher.Stats()
+	if stats.Active != 2 {
+		t.Fatalf("expected one gradual scale-up runner, got %d active runners", stats.Active)
+	}
+	if stats.Created != 1 {
+		t.Fatalf("expected one runner created by gradual scale-up, got %d", stats.Created)
+	}
+}
+
+func TestDispatcherScaleOnceGrowsByCurrentPoolRatio(t *testing.T) {
+	dispatcher := NewDispatcher(10, 100)
+	originalStartRunner := startRunnerForDispatcher
+	startRunnerForDispatcher = func(runner *Runner, ready chan error) {
+		ready <- nil
+	}
+	defer func() {
+		startRunnerForDispatcher = originalStartRunner
+		for _, runner := range dispatcher.drainIdleRunners() {
+			runner.Destroy(nil)
+		}
+	}()
+
+	dispatcher.mu.Lock()
+	dispatcher.total = 50
+	dispatcher.health.missing = 25
+	dispatcher.health.total = 50
+	dispatcher.mu.Unlock()
+
+	dispatcher.scaleOnce()
+
+	stats := dispatcher.Stats()
+	if stats.Active != 60 {
+		t.Fatalf("expected scale-up by 20 percent of current pool, got %d active runners", stats.Active)
+	}
+	if stats.Created != 10 {
+		t.Fatalf("expected 10 runners created by ratio scale-up, got %d", stats.Created)
+	}
+}
+
 func TestDispatcherSelectBacksOffAfterCreateFailure(t *testing.T) {
 	dispatcher := NewDispatcher(0, 100)
 	originalStartRunner := startRunnerForDispatcher

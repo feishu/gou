@@ -44,6 +44,8 @@ var startRunnerForDispatcher = func(runner *Runner, ready chan error) {
 }
 
 const dispatcherCreateFailureBackoff = 10 * time.Millisecond
+const dispatcherMinScaleSamples uint = 5
+const dispatcherMaxScaleUpStep uint = 20
 
 // NewDispatcher is a runner dispatcher
 func NewDispatcher(min, max uint) *Dispatcher {
@@ -597,6 +599,10 @@ func (dispatcher *Dispatcher) drainIdleRunners() []*Runner {
 }
 
 func (dispatcher *Dispatcher) scaleOnce() {
+	for _, runner := range dispatcher.shrinkIdleRunners() {
+		runner.Destroy(nil)
+	}
+
 	dispatcher.mu.Lock()
 	if dispatcher.state != dispatcherRunning || dispatcher.health.total == 0 {
 		dispatcher.health.Reset()
@@ -605,20 +611,63 @@ func (dispatcher *Dispatcher) scaleOnce() {
 	}
 
 	percent := float64(dispatcher.health.missing) / float64(dispatcher.health.total)
-	missing := dispatcher.max - dispatcher.total
+	scaleUp := dispatcher.scaleUpCountLocked()
 	dispatcher.health.Reset()
 	dispatcher.mu.Unlock()
 
 	log.Trace("[dispatcher] the health percent is %f", percent)
-	if percent <= 0.2 {
+	if percent <= 0.2 || scaleUp == 0 {
 		return
 	}
 
-	for i := uint(0); i < missing; i++ {
+	for i := uint(0); i < scaleUp; i++ {
 		if err := dispatcher.create(); err != nil {
 			return
 		}
 	}
+}
+
+func (dispatcher *Dispatcher) scaleUpCountLocked() uint {
+	if dispatcher.health.total < dispatcherMinScaleSamples || dispatcher.total >= dispatcher.max {
+		return 0
+	}
+
+	missing := dispatcher.max - dispatcher.total
+	step := dispatcher.total / 5
+	if step == 0 {
+		step = 1
+	}
+	if step > dispatcherMaxScaleUpStep {
+		step = dispatcherMaxScaleUpStep
+	}
+	if missing < step {
+		return missing
+	}
+	return step
+}
+
+func (dispatcher *Dispatcher) shrinkIdleRunners() []*Runner {
+	runners := []*Runner{}
+	dispatcher.mu.Lock()
+	defer dispatcher.mu.Unlock()
+
+	if dispatcher.state != dispatcherRunning || dispatcher.total <= dispatcher.min {
+		return runners
+	}
+
+	excess := dispatcher.total - dispatcher.min
+	for i := uint(0); i < excess; i++ {
+		select {
+		case runner := <-dispatcher.availables:
+			if runner != nil {
+				runners = append(runners, runner)
+			}
+		default:
+			return runners
+		}
+	}
+
+	return runners
 }
 
 func (health *Health) String() string {

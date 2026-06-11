@@ -82,6 +82,13 @@ type Inspect struct {
 type TSConfig struct {
 	CompilerOptions *TSConfigCompilerOptions `json:"compilerOptions,omitempty"`
 	Exclude         []string                 `json:"exclude,omitempty"`
+	cacheMu         sync.RWMutex
+	pathCache       map[string]tsConfigPathCache
+}
+
+type tsConfigPathCache struct {
+	file  string
+	match bool
 }
 
 // TSConfigCompilerOptions TypeScript compiler options

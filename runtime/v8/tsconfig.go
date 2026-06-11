@@ -14,17 +14,21 @@ func (tsconfg *TSConfig) GetFileName(path string) (string, bool, error) {
 		return path, false, nil
 	}
 
+	if file, match, has := tsconfg.cached(path); has {
+		return file, match, nil
+	}
+
 	if tsconfg.CompilerOptions == nil || tsconfg.CompilerOptions.Paths == nil {
+		tsconfg.cache(path, path, false)
 		return path, false, nil
 	}
 
 	for pattern, paths := range tsconfg.CompilerOptions.Paths {
 		if tsconfg.Match(pattern, path) {
-			f := tsconfg.ReplacePattern(path, pattern)
 			for _, p := range paths {
 				matched := false
 				dir := filepath.Clean(filepath.Dir(p))
-				f = filepath.Join(dir, f)
+				f := filepath.Join(dir, tsconfg.ReplacePattern(path, pattern))
 				err := application.App.Walk(dir, func(root, filename string, isdir bool) error {
 					if isdir {
 						return nil
@@ -37,16 +41,47 @@ func (tsconfg *TSConfig) GetFileName(path string) (string, bool, error) {
 				}, "*.ts")
 
 				if matched {
+					tsconfg.cache(path, f, true)
 					return f, true, nil
 				}
 
 				if err == nil {
+					tsconfg.cache(path, path, false)
 					return path, false, nil
 				}
 			}
 		}
 	}
+	tsconfg.cache(path, path, false)
 	return path, false, nil
+}
+
+func (tsconfg *TSConfig) cached(path string) (string, bool, bool) {
+	tsconfg.cacheMu.RLock()
+	defer tsconfg.cacheMu.RUnlock()
+	if tsconfg.pathCache == nil {
+		return "", false, false
+	}
+	item, has := tsconfg.pathCache[path]
+	if !has {
+		return "", false, false
+	}
+	return item.file, item.match, true
+}
+
+func (tsconfg *TSConfig) cache(path string, file string, match bool) {
+	tsconfg.cacheMu.Lock()
+	defer tsconfg.cacheMu.Unlock()
+	if tsconfg.pathCache == nil {
+		tsconfg.pathCache = map[string]tsConfigPathCache{}
+	}
+	tsconfg.pathCache[path] = tsConfigPathCache{file: file, match: match}
+}
+
+func (tsconfg *TSConfig) clearCache() {
+	tsconfg.cacheMu.Lock()
+	defer tsconfg.cacheMu.Unlock()
+	tsconfg.pathCache = nil
 }
 
 // Match match the pattern

@@ -136,6 +136,9 @@ func CLearModules() {
 	Modules = map[string]Module{}
 	ImportMap = map[string][]Import{}
 	clearSourceMaps()
+	if runtimeOption.TSConfig != nil {
+		runtimeOption.TSConfig.clearCache()
+	}
 }
 
 // TransformTS transform the typescript
@@ -146,19 +149,22 @@ func TransformTS(file string, source []byte) ([]byte, error) {
 		return nil, err
 	}
 
+	keepSourceMap := shouldKeepSourceMap()
 	result := api.Transform(tsCode, api.TransformOptions{
 		Loader:     api.LoaderTS,
 		Target:     api.ESNext,
 		Sourcefile: file,
-		Sourcemap:  api.SourceMapExternal,
+		Sourcemap:  sourceMapOption(keepSourceMap),
 	})
 
 	if len(result.Errors) > 0 {
 		return nil, newTransformErrorFromMessages(file, result.Errors)
 	}
 
-	SourceMaps[file] = result.Map
-	SourceCodes[file] = result.Code
+	if keepSourceMap {
+		SourceMaps[file] = cloneBytes(result.Map)
+		SourceCodes[file] = cloneBytes(result.Code)
+	}
 
 	// Add the module source
 	jsCode := result.Code
@@ -183,6 +189,26 @@ func TransformTS(file string, source []byte) ([]byte, error) {
 		exportRe.ReplaceAllStringFunc(string(jsCode), func(m string) string {
 			return strings.ReplaceAll(m, "export ", "")
 		})), nil
+}
+
+func shouldKeepSourceMap() bool {
+	return runtimeOption.Debug || runtimeOption.Inspect.Enabled
+}
+
+func sourceMapOption(keep bool) api.SourceMap {
+	if keep {
+		return api.SourceMapExternal
+	}
+	return api.SourceMapNone
+}
+
+func cloneBytes(data []byte) []byte {
+	if data == nil {
+		return nil
+	}
+	cloned := make([]byte, len(data))
+	copy(cloned, data)
+	return cloned
 }
 
 type entry struct {
@@ -278,6 +304,7 @@ func loadModule(file string, tsCode string) error {
 	dir := filepath.Join(root, paths[0]) // <app_root>/scripts, <app_root>/services, etc..
 	outdir := filepath.Join(string(os.PathSeparator), "outdir")
 
+	keepSourceMap := shouldKeepSourceMap()
 	result := api.Build(api.BuildOptions{
 		EntryPoints: files,
 		Bundle:      true,
@@ -287,7 +314,7 @@ func loadModule(file string, tsCode string) error {
 		Loader: map[string]api.Loader{
 			".ts": api.LoaderTS,
 		},
-		Sourcemap: api.SourceMapExternal,
+		Sourcemap: sourceMapOption(keepSourceMap),
 		Outbase:   dir,
 		Outdir:    outdir,
 		Plugins: []api.Plugin{
@@ -316,21 +343,22 @@ func loadModule(file string, tsCode string) error {
 		return newTransformErrorFromMessages(file, result.Errors)
 	}
 
-	if len(result.OutputFiles) > 1 {
-		for _, out := range result.OutputFiles {
-			if strings.HasSuffix(out.Path, ".js.map") {
-				key := strings.TrimPrefix(strings.ReplaceAll(out.Path, ".js.map", ".ts"), outdir)
-				key = filepath.Join(dir, key)
-				ModuleSourceMaps[key] = out.Contents
+	for _, out := range result.OutputFiles {
+		if strings.HasSuffix(out.Path, ".js.map") {
+			if !keepSourceMap {
+				continue
+			}
+			key := strings.TrimPrefix(strings.ReplaceAll(out.Path, ".js.map", ".ts"), outdir)
+			key = filepath.Join(dir, key)
+			ModuleSourceMaps[key] = cloneBytes(out.Contents)
 
-			} else if strings.HasSuffix(out.Path, ".js") {
-				key := strings.TrimPrefix(strings.ReplaceAll(out.Path, ".js", ".ts"), outdir)
-				key = filepath.Join(dir, key)
-				Modules[key] = Module{
-					File:       file,
-					GlobalName: globalName,
-					Source:     string(out.Contents),
-				}
+		} else if strings.HasSuffix(out.Path, ".js") {
+			key := strings.TrimPrefix(strings.ReplaceAll(out.Path, ".js", ".ts"), outdir)
+			key = filepath.Join(dir, key)
+			Modules[key] = Module{
+				File:       file,
+				GlobalName: globalName,
+				Source:     string(out.Contents),
 			}
 		}
 	}
