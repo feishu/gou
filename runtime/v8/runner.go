@@ -94,6 +94,7 @@ func NewRunner(keepalive bool, owner *Dispatcher) *Runner {
 	}
 }
 
+
 // Start start the v8 runner
 func (runner *Runner) Start(ready chan error) error {
 	runner.mu.Lock()
@@ -129,27 +130,18 @@ func (runner *Runner) Start(ready chan error) error {
 	runner.status = RunnerStatusReady
 	runner.mu.Unlock()
 
-	ticker := time.NewTicker(time.Millisecond * 50)
-	defer ticker.Stop()
-
 	ready <- nil
 
 	// Command loop
 	for {
 		select {
-		case <-ticker.C:
-			break
-
 		case signal := <-runner.signal:
 			switch signal {
-
 			case RunnerCommandReset:
 				runner.reset()
-				break
 
 			case RunnerCommandExec:
 				runner.exec()
-				break
 
 			case RunnerCommandDestroy:
 				runner.destroy()
@@ -158,7 +150,6 @@ func (runner *Runner) Start(ready chan error) error {
 			default:
 				log.Warn("runner unknown signal: %d", signal)
 			}
-
 		}
 	}
 }

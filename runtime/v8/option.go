@@ -26,7 +26,7 @@ func EnableDebug() {
 func (option *Option) Validate() {
 
 	if option.MinSize == 0 {
-		option.MinSize = 50
+		option.MinSize = 10
 	}
 
 	if option.MaxSize == 0 {
