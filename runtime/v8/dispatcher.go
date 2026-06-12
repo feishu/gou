@@ -508,7 +508,6 @@ func (dispatcher *Dispatcher) notifyCapacityChanged() {
 	}
 }
 
-
 func (dispatcher *Dispatcher) canCreate() bool {
 	dispatcher.mu.Lock()
 	defer dispatcher.mu.Unlock()
@@ -602,10 +601,6 @@ func (dispatcher *Dispatcher) drainIdleRunners() []*Runner {
 func (dispatcher *Dispatcher) scaleOnce() {
 	shrunk := dispatcher.shrinkIdleRunners()
 	for _, runner := range shrunk {
-		// total 已在 shrinkIdleRunners 中递减，断开 dispatcher 关联避免 destroy 重复计数
-		runner.mu.Lock()
-		runner.dispatcher = nil
-		runner.mu.Unlock()
 		runner.Destroy(nil)
 	}
 
@@ -667,9 +662,6 @@ func (dispatcher *Dispatcher) shrinkIdleRunners() []*Runner {
 		case runner := <-dispatcher.availables:
 			if runner != nil {
 				runners = append(runners, runner)
-				// 立即递减 total，防止新请求在 destroy 异步执行前绕过 max 限制
-				dispatcher.total--
-				dispatcher.stats.Destroyed++
 			}
 		default:
 			return runners

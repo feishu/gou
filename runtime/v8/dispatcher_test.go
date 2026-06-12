@@ -266,6 +266,70 @@ func TestDispatcherScaleOnceShrinksIdleRunnersToMin(t *testing.T) {
 	}
 }
 
+func TestDispatcherScaleOnceWaitsForRealDestroyBeforeCounting(t *testing.T) {
+	option := option()
+	option.Mode = "performance"
+	option.MinSize = 1
+	option.MaxSize = 2
+	option.DefaultTimeout = 500
+	option.HeapSizeLimit = 4294967296
+
+	prepareSetup(t, option)
+	defer cleanupDispatcherForTest(t)
+
+	runner1, err := dispatcher.Select(500 * time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner2, err := dispatcher.Select(500 * time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	releaseExecution := runner1.execution.acquire()
+	defer releaseExecution()
+
+	if !dispatcher.release(runner1, true) {
+		t.Fatalf("failed to release runner %s", runner1.id)
+	}
+	if !dispatcher.release(runner2, true) {
+		t.Fatalf("failed to release runner %s", runner2.id)
+	}
+
+	waitForDispatcherStats(t, func(stats DispatcherStats) bool {
+		return stats.Active == 2 && stats.Idle == 2
+	})
+
+	dispatcher.scaleOnce()
+
+	if runner1.waitDestroyed(10 * time.Millisecond) {
+		t.Fatal("runner should still be blocked before execution release")
+	}
+
+	stats := dispatcher.Stats()
+	if stats.Active != 2 {
+		t.Fatalf("expected active runners to stay at 2 before destroy completes, got %d", stats.Active)
+	}
+	if stats.Idle != 1 {
+		t.Fatalf("expected one idle runner before destroy completes, got %d", stats.Idle)
+	}
+	if stats.Destroyed != 0 {
+		t.Fatalf("expected destroyed count to stay at 0 before destroy completes, got %d", stats.Destroyed)
+	}
+
+	releaseExecution()
+	if !runner1.waitDestroyed(time.Second) {
+		t.Fatal("runner was not destroyed after execution release")
+	}
+
+	stats = waitForDispatcherStats(t, func(stats DispatcherStats) bool {
+		return stats.Active == 1 && stats.Idle == 1 && stats.Destroyed == 1
+	})
+	if stats.Leased != 0 {
+		t.Fatalf("expected no leased runners after destroy completes, got %d", stats.Leased)
+	}
+}
+
 func TestDispatcherScaleOnceIgnoresSmallSampleWindow(t *testing.T) {
 	dispatcher := NewDispatcher(1, 20)
 	originalStartRunner := startRunnerForDispatcher
