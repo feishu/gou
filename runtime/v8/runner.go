@@ -94,7 +94,6 @@ func NewRunner(keepalive bool, owner *Dispatcher) *Runner {
 	}
 }
 
-
 // Start start the v8 runner
 func (runner *Runner) Start(ready chan error) error {
 	runner.mu.Lock()
@@ -306,7 +305,7 @@ func (runner *Runner) _exec() {
 	}
 
 	// Create instance of the script
-	source := inv.script.Source
+	source := runtimeScriptSource(inv.script)
 	origin := inv.script.File
 	if scriptTarget != nil {
 		source = scriptTarget.scriptSource()

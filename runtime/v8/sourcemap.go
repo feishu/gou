@@ -199,9 +199,14 @@ func parseSourceMaps(file string) (*sourceMapIndex, error) {
 	}
 	var offset int = 0
 	if runtimeOption.Import {
+		loaded := map[string]bool{}
 		if imports, has := ImportMap[file]; has {
 			for _, imp := range imports {
-				data := ModuleSourceMaps[imp.AbsPath]
+				if loaded[imp.AbsPath] {
+					continue
+				}
+
+				data, has := ModuleSourceMaps[imp.AbsPath]
 				if !has {
 					continue
 				}
@@ -221,6 +226,7 @@ func parseSourceMaps(file string) (*sourceMapIndex, error) {
 				ism.offset = offset
 				ism.path = imp.Path
 				offset += ism.count
+				loaded[imp.AbsPath] = true
 			}
 		}
 	}
@@ -245,32 +251,31 @@ func debugFlatSourceMap(script *Script, exposeSourceContent bool) (*SourceMap, e
 	sections := []debugSourceMapSection{}
 	offset := debugSourceMapOffset{}
 	if runtimeOption.Import {
+		runtimeCodes := runtimeImportCodes(script.File)
+		runtimeCodeIndex := 0
+		loaded := map[string]bool{}
 		if imports, has := ImportMap[script.File]; has {
-			for i, imp := range imports {
-				data, has := ModuleSourceMaps[imp.AbsPath]
+			for _, imp := range imports {
+				_, has := Modules[imp.AbsPath]
 				if !has {
 					continue
 				}
 
-				module, has := Modules[imp.AbsPath]
-				if !has {
-					continue
+				if !loaded[imp.AbsPath] {
+					if data, has := ModuleSourceMaps[imp.AbsPath]; has {
+						sm, err := NewSourceMap(data)
+						if err != nil {
+							return nil, err
+						}
+						sections = append(sections, debugSourceMapSection{
+							Offset: offset,
+							Map:    debugSourceMap(sm, imp.Path, exposeSourceContent),
+						})
+					}
+					offset, runtimeCodeIndex = advanceDebugSourceMapRuntimeCodeOffset(offset, runtimeCodes, runtimeCodeIndex)
+					loaded[imp.AbsPath] = true
 				}
-
-				sm, err := NewSourceMap(data)
-				if err != nil {
-					return nil, err
-				}
-				sections = append(sections, debugSourceMapSection{
-					Offset: offset,
-					Map:    debugSourceMap(sm, imp.Path, exposeSourceContent),
-				})
-
-				importCode := fmt.Sprintf("%s;const %s = %s;", module.Source, imp.Name, module.GlobalName)
-				offset = advanceDebugSourceMapOffset(offset, importCode)
-				if i < len(imports)-1 {
-					offset = advanceDebugSourceMapOffset(offset, ";")
-				}
+				offset, runtimeCodeIndex = advanceDebugSourceMapRuntimeCodeOffset(offset, runtimeCodes, runtimeCodeIndex)
 			}
 		}
 	}
@@ -444,6 +449,18 @@ func advanceDebugSourceMapOffset(offset debugSourceMapOffset, source string) deb
 		offset.Column++
 	}
 	return offset
+}
+
+func advanceDebugSourceMapRuntimeCodeOffset(offset debugSourceMapOffset, codes []string, index int) (debugSourceMapOffset, int) {
+	if index >= len(codes) {
+		return offset, index
+	}
+	offset = advanceDebugSourceMapOffset(offset, codes[index])
+	index++
+	if index < len(codes) {
+		offset = advanceDebugSourceMapOffset(offset, ";")
+	}
+	return offset, index
 }
 
 // NewSourceMap create a new source map

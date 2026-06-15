@@ -59,6 +59,7 @@ type Option struct {
 	DataRoot          string    `json:"dataRoot,omitempty"`          // the data root path
 	TSConfig          *TSConfig `json:"tsconfig,omitempty"`          // the TypeScript config
 	Debug             bool      `json:"debug,omitempty"`             // if true, the debug mode will be enabled, default value is false
+	SourceMap         bool      `json:"sourceMap,omitempty"`         // if true and debug mode is enabled, keep TypeScript source maps for debug and stack trace mapping
 	ConsoleMode       string    `json:"consoleMode,omitempty"`       // the console mode, default value is "production", the other value is "development"
 	Inspect           Inspect   `json:"inspect,omitempty"`           // V8 inspector debug option
 

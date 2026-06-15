@@ -2,7 +2,6 @@ package v8
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -166,24 +165,7 @@ func TransformTS(file string, source []byte) ([]byte, error) {
 		SourceCodes[file] = cloneBytes(result.Code)
 	}
 
-	// Add the module source
 	jsCode := result.Code
-
-	// Add the import module
-	if runtimeOption.Import {
-		importCodes := []string{}
-		if imports, has := ImportMap[file]; has {
-			for _, imp := range imports {
-				module, has := Modules[imp.AbsPath]
-				if has {
-					importCodes = append(importCodes, fmt.Sprintf("%s;const %s = %s;", module.Source, imp.Name, module.GlobalName))
-				}
-			}
-		}
-		if len(importCodes) > 0 {
-			jsCode = []byte(strings.Join(importCodes, ";") + string(result.Code))
-		}
-	}
 
 	return []byte(
 		exportRe.ReplaceAllStringFunc(string(jsCode), func(m string) string {
@@ -191,8 +173,47 @@ func TransformTS(file string, source []byte) ([]byte, error) {
 		})), nil
 }
 
+func runtimeScriptSource(script *Script) string {
+	if script == nil {
+		return ""
+	}
+
+	source := script.Source
+	if !runtimeOption.Import {
+		return source
+	}
+
+	importCodes := runtimeImportCodes(script.File)
+	if len(importCodes) == 0 {
+		return source
+	}
+	return strings.Join(importCodes, ";") + source
+}
+
+func runtimeImportCodes(file string) []string {
+	importCodes := []string{}
+	loaded := map[string]bool{}
+	if imports, has := ImportMap[file]; has {
+		for _, imp := range imports {
+			module, has := Modules[imp.AbsPath]
+			if has {
+				if !loaded[imp.AbsPath] {
+					importCodes = append(importCodes, module.Source)
+					loaded[imp.AbsPath] = true
+				}
+				importCodes = append(importCodes, importAliasCode(imp, module))
+			}
+		}
+	}
+	return importCodes
+}
+
+func importAliasCode(imp Import, module Module) string {
+	return fmt.Sprintf("const %s = %s;", imp.Name, module.GlobalName)
+}
+
 func shouldKeepSourceMap() bool {
-	return runtimeOption.Debug || runtimeOption.Inspect.Enabled
+	return runtimeOption.Debug && runtimeOption.SourceMap
 }
 
 func sourceMapOption(keep bool) api.SourceMap {
@@ -276,53 +297,68 @@ func getEntryPoints(file string, tsCode string, loaded map[string]bool) (string,
 
 func loadModule(file string, tsCode string) error {
 
-	errors := []string{}
+	_, imports, err := replaceImportCode(file, []byte(tsCode))
+	if err != nil {
+		return err
+	}
+	ImportMap[file] = imports
+
+	for _, imp := range imports {
+		if _, has := Modules[imp.AbsPath]; has {
+			continue
+		}
+
+		source, err := application.App.Read(imp.Path)
+		if err != nil {
+			return err
+		}
+		if err := buildModule(imp.Path, string(source)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func buildModule(file string, tsCode string) error {
 	root := application.App.Root()
 	absFile := filepath.Join(root, file)
 
-	// Check if the module loaded
 	if _, has := Modules[absFile]; has {
 		return nil
 	}
 
 	globalName := GetModuleName(file)
-	entryPoints := []entry{}
-	loaded := map[string]bool{}
-	tsCode, entryPoints, err := getEntryPoints(file, tsCode, loaded)
+	loaded := map[string]bool{file: true}
+	_, entryPoints, err := getEntryPoints(file, tsCode, loaded)
 	if err != nil {
 		return err
 	}
 
-	files := []string{}
 	codes := map[string]string{}
 	for _, entry := range entryPoints {
-		files = append(files, entry.absfile)
-		codes[entry.absfile] = entry.source
+		cacheBuildSource(codes, entry.absfile, entry.source)
 	}
-
-	paths := strings.Split(file, string(os.PathSeparator))
-	dir := filepath.Join(root, paths[0]) // <app_root>/scripts, <app_root>/services, etc..
-	outdir := filepath.Join(string(os.PathSeparator), "outdir")
 
 	keepSourceMap := shouldKeepSourceMap()
 	result := api.Build(api.BuildOptions{
-		EntryPoints: files,
+		EntryPoints: []string{absFile},
 		Bundle:      true,
 		Write:       false,
 		Target:      api.ESNext,
+		Format:      api.FormatIIFE,
 		GlobalName:  globalName,
 		Loader: map[string]api.Loader{
 			".ts": api.LoaderTS,
 		},
 		Sourcemap: sourceMapOption(keepSourceMap),
-		Outbase:   dir,
-		Outdir:    outdir,
+		Outdir:    "/outdir",
 		Plugins: []api.Plugin{
 			{
 				Name: "custom-import-plugin",
 				Setup: func(build api.PluginBuild) {
 					build.OnLoad(api.OnLoadOptions{Filter: `.*\.ts$`}, func(args api.OnLoadArgs) (api.OnLoadResult, error) {
-						contents := codes[args.Path]
+						contents := codes[filepath.Clean(args.Path)]
 						return api.OnLoadResult{
 							Contents: &contents,
 							Loader:   api.LoaderTS,
@@ -334,12 +370,6 @@ func loadModule(file string, tsCode string) error {
 	})
 
 	if len(result.Errors) > 0 {
-		for _, err := range result.Errors {
-			errors = append(errors, err.Text)
-		}
-	}
-
-	if len(errors) > 0 {
 		return newTransformErrorFromMessages(file, result.Errors)
 	}
 
@@ -348,14 +378,10 @@ func loadModule(file string, tsCode string) error {
 			if !keepSourceMap {
 				continue
 			}
-			key := strings.TrimPrefix(strings.ReplaceAll(out.Path, ".js.map", ".ts"), outdir)
-			key = filepath.Join(dir, key)
-			ModuleSourceMaps[key] = cloneBytes(out.Contents)
+			ModuleSourceMaps[absFile] = cloneBytes(out.Contents)
 
 		} else if strings.HasSuffix(out.Path, ".js") {
-			key := strings.TrimPrefix(strings.ReplaceAll(out.Path, ".js", ".ts"), outdir)
-			key = filepath.Join(dir, key)
-			Modules[key] = Module{
+			Modules[absFile] = Module{
 				File:       file,
 				GlobalName: globalName,
 				Source:     string(out.Contents),
@@ -364,6 +390,13 @@ func loadModule(file string, tsCode string) error {
 	}
 
 	return nil
+}
+
+func cacheBuildSource(codes map[string]string, file string, source string) {
+	codes[filepath.Clean(file)] = source
+	if realFile, err := filepath.EvalSymlinks(file); err == nil {
+		codes[filepath.Clean(realFile)] = source
+	}
 }
 
 func tsImports(file string, source []byte) (string, error) {

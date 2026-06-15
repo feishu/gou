@@ -395,6 +395,7 @@ export function Run() {
 
 	runtimeOption = option()
 	runtimeOption.Import = true
+	runtimeOption.Debug = true
 	CLearModules()
 
 	file := filepath.Join("scripts", "service", "consumer", "registration", "schedule.ts")

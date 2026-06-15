@@ -350,7 +350,7 @@ func (target *debugTarget) descriptor(r *http.Request) debugTargetDescriptor {
 }
 
 func (target *debugTarget) scriptSource() string {
-	source := target.script.Source
+	source := runtimeScriptSource(target.script)
 	if _, has := SourceMaps[target.script.File]; !has {
 		return source
 	}
