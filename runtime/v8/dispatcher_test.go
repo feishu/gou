@@ -536,3 +536,57 @@ func TestRunnerResetEvictsUnhealthyRunner(t *testing.T) {
 		t.Fatalf("created %d runners, max is %d", active, option.MaxSize)
 	}
 }
+
+func TestRunnerResetDestroyExitsStartLoop(t *testing.T) {
+	option := option()
+	option.Mode = "performance"
+	option.MinSize = 1
+	option.MaxSize = 1
+	option.DefaultTimeout = 500
+	option.HeapSizeLimit = 4294967296
+
+	originalStartRunner := startRunnerForDispatcher
+	started := make(chan *Runner, 1)
+	exited := make(chan struct{}, 1)
+	startRunnerForDispatcher = func(runner *Runner, ready chan error) {
+		started <- runner
+		go func() {
+			_ = runner.Start(ready)
+			exited <- struct{}{}
+		}()
+	}
+	defer func() { startRunnerForDispatcher = originalStartRunner }()
+
+	prepareSetup(t, option)
+	defer cleanupDispatcherForTest(t)
+
+	var runner *Runner
+	select {
+	case runner = <-started:
+	case <-time.After(time.Second):
+		t.Fatal("runner was not started")
+	}
+
+	originalHealthChecker := runnerHealthChecker
+	runnerHealthChecker = func(*Runner) bool { return false }
+	defer func() { runnerHealthChecker = originalHealthChecker }()
+
+	selected, err := dispatcher.Select(100 * time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected != runner {
+		t.Fatal("selected unexpected runner")
+	}
+
+	runner.Reset()
+	if !runner.waitDestroyed(time.Second) {
+		t.Fatal("runner was not destroyed")
+	}
+
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("destroyed runner start loop did not exit")
+	}
+}

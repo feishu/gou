@@ -137,7 +137,9 @@ func (runner *Runner) Start(ready chan error) error {
 		case signal := <-runner.signal:
 			switch signal {
 			case RunnerCommandReset:
-				runner.reset()
+				if !runner.reset() {
+					return nil
+				}
 
 			case RunnerCommandExec:
 				runner.exec()
@@ -419,10 +421,10 @@ func (runner *Runner) destroy() {
 }
 
 // reset the runner
-func (runner *Runner) reset() {
+func (runner *Runner) reset() bool {
 	if runner.isClosed() {
 		runner.destroy()
-		return
+		return false
 	}
 
 	runner.mu.Lock()
@@ -452,18 +454,18 @@ func (runner *Runner) reset() {
 
 	if runner.isClosed() {
 		runner.destroy()
-		return
+		return false
 	}
 
 	if !runnerHealthChecker(runner) {
 		runner.dispatcher.healthEvictionCount()
 		runner.destroy()
-		return
+		return false
 	}
 
 	if iso == nil || tmpl == nil {
 		runner.destroy()
-		return
+		return false
 	}
 
 	nextCtx := v8go.NewContext(iso, tmpl)
@@ -472,7 +474,7 @@ func (runner *Runner) reset() {
 		runner.mu.Unlock()
 		nextCtx.Close()
 		runner.destroy()
-		return
+		return false
 	}
 	runner.ctx = nextCtx
 	runner.status = RunnerStatusReady
@@ -480,8 +482,10 @@ func (runner *Runner) reset() {
 
 	if !runner.dispatcher.release(runner, true) {
 		runner.destroy()
+		return false
 	}
 
+	return true
 }
 
 func (runner *Runner) health() bool {
