@@ -34,6 +34,7 @@ type Task struct {
 	handlers *Handlers
 	pool     *Pool
 	jobs     map[int]*Job
+	jobsMu   sync.RWMutex
 	mutex    sync.Mutex
 	ctx      context.Context
 	cancel   context.CancelFunc

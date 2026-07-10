@@ -45,6 +45,7 @@ func New(handlers *Handlers, option Option) *Task {
 		name:     option.Name,
 		handlers: handlers,
 		jobs:     map[int]*Job{},
+		jobsMu:   sync.RWMutex{},
 		mutex:    sync.Mutex{},
 		ctx:      ctx,
 		cancel:   cancel,
@@ -100,9 +101,13 @@ func (t *Task) Add(args ...interface{}) (int, error) {
 		timeout: timeout,
 		ctx:     ctx,
 		cancel:  cancel,
+		status:  WAITING,
 	}
 
+	t.jobsMu.Lock()
 	t.jobs[id] = job
+	t.jobsMu.Unlock()
+
 	t.add(job)
 	t.pool.jobque <- job
 	return id, nil
@@ -116,20 +121,27 @@ func Progress(name string, id, curr, total int, message string) error {
 		return fmt.Errorf("task %s does not exist", name)
 	}
 
+	t.jobsMu.Lock()
 	job, has := t.jobs[id]
 	if !has {
+		t.jobsMu.Unlock()
 		return fmt.Errorf("job %d does not exist or was completed", id)
 	}
 
 	job.curr = curr
 	job.total = total
 	job.message = message
+	t.jobsMu.Unlock()
+
 	t.progress(job, curr, total, message)
 	return nil
 }
 
 // Get get job by job id
 func (t *Task) Get(id int) (map[string]interface{}, error) {
+	t.jobsMu.RLock()
+	defer t.jobsMu.RUnlock()
+
 	job, has := t.jobs[id]
 	if !has {
 		return nil, fmt.Errorf("job %d does not exist or was completed", id)
@@ -168,7 +180,7 @@ func (t *Task) startWorker(w *Worker) {
 func (t *Task) start(job *Job) {
 
 	defer job.cancel()
-	defer delete(t.jobs, job.id)
+	defer t.deleteJob(job.id)
 
 	ch := make(chan interface{}, 1) // the result channel
 	chError := make(chan error, 1)  // the error channel
@@ -230,7 +242,10 @@ func (t *Task) nextID() int {
 //  1. The goroutine will be running until the handler completed, it should be killed.
 //  2. Should retry if the handler is error or panic
 func (t *Task) exec(job *Job) (interface{}, error) {
+	t.jobsMu.Lock()
 	job.status = RUNNING
+	t.jobsMu.Unlock()
+
 	if t.handlers.Exec == nil {
 		err := fmt.Errorf("[TASK] %s Job:%v, is not set the execute handler", t.name, job.id)
 		return nil, err
@@ -239,8 +254,11 @@ func (t *Task) exec(job *Job) (interface{}, error) {
 }
 
 func (t *Task) failure(job *Job, err error) {
+	t.jobsMu.Lock()
 	job.status = FAILURE
 	job.response = err.Error()
+	t.jobsMu.Unlock()
+
 	if t.handlers.Error == nil {
 		return
 	}
@@ -248,8 +266,11 @@ func (t *Task) failure(job *Job, err error) {
 }
 
 func (t *Task) success(job *Job, response interface{}) {
+	t.jobsMu.Lock()
 	job.status = SUCCESS
 	job.response = response
+	t.jobsMu.Unlock()
+
 	if t.handlers.Success == nil {
 		return
 	}
@@ -257,7 +278,6 @@ func (t *Task) success(job *Job, response interface{}) {
 }
 
 func (t *Task) add(job *Job) {
-	job.status = WAITING
 	if t.handlers.Add == nil {
 		return
 	}
@@ -269,4 +289,11 @@ func (t *Task) progress(job *Job, curr, total int, message string) {
 		return
 	}
 	t.handlers.Progress(job.id, curr, total, message)
+}
+
+func (t *Task) deleteJob(id int) {
+	t.jobsMu.Lock()
+	defer t.jobsMu.Unlock()
+
+	delete(t.jobs, id)
 }
