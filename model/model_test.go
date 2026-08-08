@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	jsoniter "github.com/json-iterator/go"
@@ -49,6 +50,54 @@ func TestReload(t *testing.T) {
 	user := Select("user")
 	_, err := user.Reload()
 	assert.Nil(t, err)
+}
+
+func TestLoadSourceConcurrentWithSelect(t *testing.T) {
+	previousGlobal := capsule.Global
+	capsule.Global = nil
+	defer func() { capsule.Global = previousGlobal }()
+
+	const id = "concurrent-load"
+	const source = `{"name":"ConcurrentLoad","table":{"name":"concurrent_load"},"columns":[]}`
+	if _, err := LoadSource([]byte(source), id, ""); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		rwlock.Lock()
+		delete(Models, id)
+		rwlock.Unlock()
+	}()
+
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	workers.Add(5)
+
+	go func() {
+		defer workers.Done()
+		<-start
+		for range 2000 {
+			if _, err := LoadSource([]byte(source), id, ""); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+
+	for range 4 {
+		go func() {
+			defer workers.Done()
+			<-start
+			for range 2000 {
+				if Select(id) == nil {
+					t.Error("并发读取返回了空模型")
+					return
+				}
+			}
+		}()
+	}
+
+	close(start)
+	workers.Wait()
 }
 
 func TestMigrate(t *testing.T) {

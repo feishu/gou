@@ -19,15 +19,11 @@ var rwlock sync.RWMutex // Use RWMutex for better concurrency
 
 // LoadSync load model sync
 func LoadSync(file string, id string) (*Model, error) {
-	rwlock.Lock()
-	defer rwlock.Unlock()
 	return Load(file, id)
 }
 
 // LoadSourceSync load model sync
 func LoadSourceSync(source []byte, id string, file string) (*Model, error) {
-	rwlock.Lock()
-	defer rwlock.Unlock()
 	return LoadSource(source, id, "")
 }
 
@@ -191,7 +187,9 @@ func LoadSource(source []byte, id string, file string) (*Model, error) {
 		mod.Driver = capsule.Schema().MustGetConnection().Config.Driver
 	}
 
+	rwlock.Lock()
 	Models[id] = mod
+	rwlock.Unlock()
 	return mod, nil
 }
 
