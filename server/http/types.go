@@ -2,6 +2,7 @@ package http
 
 import (
 	"net"
+	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -32,17 +33,19 @@ const (
 
 // Option the http server opiton
 type Option struct {
-	Port    int           `json:"port,omitempty"`
-	Host    string        `json:"host,omitempty"`
-	Timeout time.Duration `json:"timeout,omitempty"`
-	Root    string        `json:"root,omitempty"`   // API Root
-	Allows  []string      `json:"allows,omitempty"` // CORS Domains
+	Port         int           `json:"port,omitempty"`
+	Host         string        `json:"host,omitempty"`
+	Timeout      time.Duration `json:"timeout,omitempty"`
+	DrainTimeout time.Duration `json:"drain_timeout,omitempty"` // 优雅关机排空超时时间，默认 15s
+	Root         string        `json:"root,omitempty"`          // API Root
+	Allows       []string      `json:"allows,omitempty"`        // CORS Domains
 }
 
 // Server the http server opiton
 type Server struct {
 	router    *gin.Engine
 	addr      net.Addr
+	srv       *http.Server
 	signal    chan uint8
 	event     chan uint8
 	status    uint8

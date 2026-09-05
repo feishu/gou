@@ -14,6 +14,7 @@ import (
 	"github.com/yaoapp/gou/query/share"
 	"github.com/yaoapp/kun/any"
 	"github.com/yaoapp/kun/exception"
+	"github.com/yaoapp/kun/log"
 	"github.com/yaoapp/kun/maps"
 	"github.com/yaoapp/kun/utils"
 	"github.com/yaoapp/xun"
@@ -171,6 +172,12 @@ func (gou Query) Run(data maps.Map) interface{} {
 	if gou.Debug {
 		fmt.Println(sql)
 		utils.Dump(bindings)
+	}
+
+	// 针对裸 SQL 事务进行反模式警示，防止连接池污染与数据回滚失效
+	trimmedSQL := strings.ToUpper(strings.TrimSpace(sql))
+	if strings.HasPrefix(trimmedSQL, "START TRANSACTION") || strings.HasPrefix(trimmedSQL, "BEGIN") {
+		log.Warn("[Query] WARNING: Executing raw '%s' via connection pool is an unsafe anti-pattern. Statements run on detached connections and will NOT roll back atomically. Please use model.Transaction closure instead.", sql)
 	}
 
 	res, err := qb.DB().Exec(sql, bindings...)

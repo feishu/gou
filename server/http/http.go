@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -18,6 +19,10 @@ func New(router *gin.Engine, option Option) *Server {
 
 	if option.Timeout == 0 {
 		option.Timeout = 5 * time.Second
+	}
+
+	if option.DrainTimeout == 0 {
+		option.DrainTimeout = 15 * time.Second
 	}
 
 	return &Server{
@@ -85,6 +90,7 @@ func (server *Server) Start() error {
 	// network preparing
 	server.addr = listener.Addr()
 	srv := &http.Server{Addr: server.addr.String(), Handler: server.router}
+	server.srv = srv
 
 	// close server
 	defer func() {
@@ -92,10 +98,18 @@ func (server *Server) Start() error {
 			return
 		}
 
-		log.Info("[Server] %s was closed", srv.Addr)
-		err := srv.Close()
+		log.Info("[Server] %s is shutting down gracefully...", srv.Addr)
+		drainTimeout := server.option.DrainTimeout
+		if drainTimeout <= 0 {
+			drainTimeout = 15 * time.Second
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+		defer cancel()
+
+		err := srv.Shutdown(shutdownCtx)
 		if err != nil {
-			log.Error("[Server] %s %s", srv.Addr, err.Error())
+			log.Warn("[Server] %s graceful shutdown warning: %v, forcing close", srv.Addr, err)
+			_ = srv.Close()
 		}
 
 		server.status = CLOSED
@@ -155,19 +169,21 @@ func (server *Server) Start() error {
 				break
 
 			case CLOSE:
-				err = listener.Close()
+				log.Info("[Server] %s is shutting down gracefully...", srv.Addr)
+				drainTimeout := server.option.DrainTimeout
+				if drainTimeout <= 0 {
+					drainTimeout = 15 * time.Second
+				}
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+				defer cancel()
+
+				err := srv.Shutdown(shutdownCtx)
 				if err != nil {
-					log.Error("[Server] %s close error (%s)", srv.Addr, err.Error())
-					return err
+					log.Warn("[Server] %s graceful shutdown warning: %v, forcing close", srv.Addr, err)
+					_ = srv.Close()
 				}
 
-				err = srv.Close()
-				if err != nil {
-					log.Error("[Server] %s restarting (%s)", srv.Addr, err.Error())
-					return err
-				}
-
-				log.Info("[Server] %s was closed", srv.Addr)
+				log.Info("[Server] %s gracefully closed", srv.Addr)
 				return nil
 
 			case RESTART:

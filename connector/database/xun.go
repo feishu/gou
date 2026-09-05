@@ -194,6 +194,8 @@ func (x *Xun) getDSN(i int) (string, error) {
 		return x.sqlite3DSN(i)
 	case "postgres":
 		return x.postgresDSN(i)
+	case "dameng", "dm":
+		return x.damengDSN(i)
 	}
 
 	return "", fmt.Errorf("the driver %s does not support", x.Driver)
@@ -294,6 +296,43 @@ func (x *Xun) postgresDSN(i int) (string, error) {
 
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", host.User, host.Pass, host.Host, host.Port, x.Options.DB)
 
+	return dsn, nil
+}
+
+func (x *Xun) damengDSN(i int) (string, error) {
+	if len(x.Options.Hosts) == 0 {
+		return "", fmt.Errorf("options.hosts is required")
+	}
+
+	host := x.Options.Hosts[i]
+	if host.Host == "" {
+		return "", fmt.Errorf("hosts.%d.host is required", i)
+	}
+
+	if host.Port == "" {
+		host.Port = "5236"
+	}
+
+	if host.User == "" {
+		return "", fmt.Errorf("hosts.%d.user is required", i)
+	}
+
+	if host.Pass == "" {
+		return "", fmt.Errorf("hosts.%d.pass is required", i)
+	}
+
+	// dm://user:password@host:port/dbname?autoCommit=true
+	path := ""
+	if x.Options.DB != "" {
+		path = "/" + x.Options.DB
+	}
+
+	params := []string{"autoCommit=true"}
+	if x.Options.Timeout > 0 {
+		params = append(params, fmt.Sprintf("connectTimeout=%d", x.Options.Timeout*1000))
+	}
+
+	dsn := fmt.Sprintf("dm://%s:%s@%s:%s%s?%s", host.User, host.Pass, host.Host, host.Port, path, strings.Join(params, "&"))
 	return dsn, nil
 }
 

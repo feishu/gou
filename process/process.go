@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/fatih/color"
 	jsoniter "github.com/json-iterator/go"
@@ -45,18 +44,30 @@ func Of(name string, args ...interface{}) (*Process, error) {
 
 // Execute execute the process and return error only
 func (process *Process) Execute() (err error) {
-	if process.Context == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		process.Context = ctx
-	}
-
 	var hd Handler
 	hd, err = process.handler()
 	if err != nil {
 		return err
 	}
 
+	// Fast-Path: when no external context is provided, execute directly in current goroutine
+	// Eliminates short-lived goroutines, channel allocations, and select context switches
+	if process.Context == nil {
+		defer func() {
+			recovered := recover()
+			if recovered != nil {
+				err = exception.Catch(recovered)
+				if err != nil {
+					exception.DebugPrint(err, "%s", process)
+				}
+			}
+		}()
+		value := hd(process)
+		process._val = &value
+		return nil
+	}
+
+	// Slow-Path: monitor with external context
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

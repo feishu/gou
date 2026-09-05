@@ -1,7 +1,9 @@
 package process
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/yaoapp/kun/exception"
@@ -337,4 +339,20 @@ func checkHandlers(t *testing.T) {
 	assert.True(t, keys["models.test"])
 	assert.True(t, keys["session.get"])
 	assert.True(t, keys["unit.test.prepare"])
+}
+
+func TestProcessExecuteSlowPathTimeout(t *testing.T) {
+	prepare(t)
+	Register("unit.test.slow", func(p *Process) interface{} {
+		time.Sleep(100 * time.Millisecond)
+		return "done"
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	p := New("unit.test.slow").WithContext(ctx)
+	err := p.Execute()
+	assert.Error(t, err)
+	assert.Equal(t, context.DeadlineExceeded, err)
 }

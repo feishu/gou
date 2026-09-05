@@ -134,6 +134,7 @@ func standardCompatStats() StandardCompatStats {
 type standardCompatStore struct {
 	mu      sync.Mutex
 	cond    *sync.Cond
+	notify  chan struct{}
 	idle    []*store.Isolate
 	max     uint
 	total   uint
@@ -142,7 +143,9 @@ type standardCompatStore struct {
 }
 
 func newStandardCompat() *standardCompatStore {
-	compat := &standardCompatStore{}
+	compat := &standardCompatStore{
+		notify: make(chan struct{}),
+	}
 	compat.cond = sync.NewCond(&compat.mu)
 	return compat
 }
@@ -154,12 +157,19 @@ func (compat *standardCompatStore) reset(max uint) {
 	compat.total = 0
 	compat.created = 0
 	compat.closed = false
+	if compat.notify != nil {
+		close(compat.notify)
+	}
+	compat.notify = make(chan struct{})
 	compat.mu.Unlock()
 	compat.cond.Broadcast()
 }
 
 func (compat *standardCompatStore) selectIsolate(timeout time.Duration) (*store.Isolate, error) {
 	deadline := time.Now().Add(timeout)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	for {
 		compat.mu.Lock()
 		if compat.closed {
@@ -184,12 +194,29 @@ func (compat *standardCompatStore) selectIsolate(timeout time.Duration) (*store.
 			iso.OnDispose = compat.releaseIsolate
 			return iso, nil
 		}
+
+		notify := compat.notify
 		compat.mu.Unlock()
 
-		if time.Until(deadline) <= 0 {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
 			return nil, fmt.Errorf("Select isolate timeout %v", timeout)
 		}
-		time.Sleep(5 * time.Millisecond)
+
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(remaining)
+
+		select {
+		case <-notify:
+			continue
+		case <-timer.C:
+			return nil, fmt.Errorf("Select isolate timeout %v", timeout)
+		}
 	}
 }
 
@@ -203,6 +230,10 @@ func (compat *standardCompatStore) releaseIsolate(iso *store.Isolate) {
 		if compat.total > 0 {
 			compat.total--
 		}
+		if compat.notify != nil {
+			close(compat.notify)
+			compat.notify = make(chan struct{})
+		}
 		compat.mu.Unlock()
 		compat.cond.Broadcast()
 		iso.OnDispose = nil
@@ -212,6 +243,10 @@ func (compat *standardCompatStore) releaseIsolate(iso *store.Isolate) {
 
 	iso.Unlock()
 	compat.idle = append(compat.idle, iso)
+	if compat.notify != nil {
+		close(compat.notify)
+		compat.notify = make(chan struct{})
+	}
 	compat.mu.Unlock()
 	compat.cond.Broadcast()
 }
@@ -222,6 +257,10 @@ func (compat *standardCompatStore) stop() {
 	idle := compat.idle
 	compat.idle = nil
 	compat.total = 0
+	if compat.notify != nil {
+		close(compat.notify)
+		compat.notify = make(chan struct{})
+	}
 	compat.mu.Unlock()
 	compat.cond.Broadcast()
 

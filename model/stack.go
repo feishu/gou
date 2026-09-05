@@ -1,6 +1,11 @@
 package model
 
 import (
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+
 	"github.com/yaoapp/kun/log"
 	"github.com/yaoapp/kun/maps"
 	"github.com/yaoapp/xun"
@@ -201,7 +206,11 @@ func (stack *QueryStack) paginate(page int, pagesize int, res *[][]maps.MapStrAn
 	for _, row := range rows {
 		fmtRow := maps.MapStr{}
 		for key, value := range row {
-			if cmap, has := builder.ColumnMap[key]; has {
+			cmap, has := builder.ColumnMap[key]
+			if !has {
+				cmap, has = builder.ColumnMap[strings.ToLower(key)]
+			}
+			if has {
 				fmtRow[cmap.Export] = value
 				cmap.Column.FliterOut(value, fmtRow, cmap.Export)
 				continue
@@ -218,24 +227,45 @@ func (stack *QueryStack) paginate(page int, pagesize int, res *[][]maps.MapStrAn
 
 func (stack *QueryStack) run(res *[][]maps.MapStrAny, builder QueryStackBuilder, param QueryStackParam) {
 
+	// 默认单表安全保护：未指定时默认取 100 条防止全表扫描导致内存暴涨
+	// 若显式传入 Limit < 0（如 -1），则表示不限条数
 	limit := 100
+	unlimited := false
 	if param.QueryParam.Limit > 0 {
 		limit = param.QueryParam.Limit
+	} else if param.QueryParam.Limit < 0 {
+		unlimited = true
 	}
 
 	if param.QueryParam.Debug {
+		sqlStr := builder.Query.ToSQL()
+		bindings := builder.Query.GetBindings()
+		if !unlimited {
+			sqlStr = builder.Query.Limit(limit).ToSQL()
+			bindings = builder.Query.Limit(limit).GetBindings()
+		}
 		defer log.With(log.F{
-			"sql":      builder.Query.Limit(limit).ToSQL(),
-			"bindings": builder.Query.Limit(limit).GetBindings()}).
+			"sql":      sqlStr,
+			"bindings": bindings}).
 			Trace("QueryStack run()")
 	}
 
-	rows := builder.Query.Limit(limit).MustGet()
+	var rows []xun.R
+	if unlimited {
+		rows = builder.Query.MustGet()
+	} else {
+		rows = builder.Query.Limit(limit).MustGet()
+	}
+
 	fmtRows := []maps.MapStr{}
 	for _, row := range rows {
 		fmtRow := maps.MapStr{}
 		for key, value := range row {
-			if cmap, has := builder.ColumnMap[key]; has {
+			cmap, has := builder.ColumnMap[key]
+			if !has {
+				cmap, has = builder.ColumnMap[strings.ToLower(key)]
+			}
+			if has {
 				fmtRow[cmap.Export] = value
 				cmap.Column.FliterOut(value, fmtRow, cmap.Export)
 				continue
@@ -260,10 +290,31 @@ func (stack *QueryStack) runHasMany(res *[][]maps.MapStrAny, builder QueryStackB
 	// 获取上次查询结果，拼接结果集ID
 	rel := stack.Relation()
 	foreignIDs := []interface{}{}
-	prevRows := (*res)[len(*res)-1]
+	if len(*res) == 0 {
+		return
+	}
+
+	// 优先定位包含外键字段的上一层主表数据（默认根主表数据，避免多个同级 hasMany 相互污染）
+	prevRows := (*res)[0]
+	if len(*res) > 1 {
+		lastRows := (*res)[len(*res)-1]
+		if len(lastRows) > 0 && lastRows[0].Has(rel.Foreign) {
+			prevRows = lastRows
+		}
+	}
+
+	// 外键去重收集
+	seenKeys := map[string]struct{}{}
 	for _, row := range prevRows {
 		id := row.Get(rel.Foreign)
-		foreignIDs = append(foreignIDs, id)
+		if id != nil {
+			if k, ok := normalizeKey(id); ok {
+				if _, exists := seenKeys[k]; !exists {
+					seenKeys[k] = struct{}{}
+					foreignIDs = append(foreignIDs, id)
+				}
+			}
+		}
 	}
 
 	// 添加 WhereIn 查询数据
@@ -282,50 +333,146 @@ func (stack *QueryStack) runHasMany(res *[][]maps.MapStrAny, builder QueryStackB
 		return
 	}
 
-	limit := 100
-	if param.QueryParam.Limit > 0 {
-		limit = param.QueryParam.Limit
+	// 计算关联查询的行数限制：
+	// 针对多主记录场景，单层 SQL 的 LIMIT 不能直接使用单一的 limit（否则会导致后半段父记录数据被静默截断）
+	// 同时为了防止关联大表引发内存暴涨，按父记录数动态扩充安全上限：
+	perParentLimit := param.QueryParam.Limit
+	queryLimit := 0
+
+	if perParentLimit > 0 {
+		// 用户明确指定了每个父级最多需要的子记录数（如每个用户取 5 条最新订单）
+		queryLimit = perParentLimit * len(foreignIDs)
+	} else if perParentLimit == 0 {
+		// 用户未显式指定 limit：保留安全保护机制（防止全表扫描导致内存暴涨）
+		// 按每个父记录预留 100 条额度，而不是让所有父记录总共只能分 100 条
+		queryLimit = 100 * len(foreignIDs)
 	}
-	builder.Query.WhereIn(name, foreignIDs).Limit(limit)
+	// perParentLimit < 0 时为显式不限制 (queryLimit = 0)
+
+	if queryLimit > 0 {
+		builder.Query.WhereIn(name, foreignIDs).Limit(queryLimit)
+	} else {
+		builder.Query.WhereIn(name, foreignIDs)
+	}
 	rows := builder.Query.MustGet()
 
-	// 格式化数据
-	fmtRowMap := map[interface{}][]maps.MapStr{}
+	// 格式化数据，使用归一化字符串键消除跨数据库驱动整数类型差异（如 int32 vs int64）
+	fmtRowMap := map[string][]maps.MapStr{}
 	fmtRows := []maps.MapStr{}
 	for _, row := range rows {
 		fmtRow := maps.MapStr{}
 		for key, value := range row {
-			if cmap, has := builder.ColumnMap[key]; has {
+			cmap, has := builder.ColumnMap[key]
+			if !has {
+				cmap, has = builder.ColumnMap[strings.ToLower(key)]
+			}
+			if has {
 				fmtRow[cmap.Export] = value
 				cmap.Column.FliterOut(value, fmtRow, cmap.Export)
 				continue
 			}
 			fmtRow[key] = value
 		}
-		relKey := rel.Key
-		relVal := fmtRow.Get(relKey)
-		if relVal != nil {
-			unDotRows := fmtRow.UnDot()
-			fmtRows = append(fmtRows, unDotRows)
-			if _, has := fmtRowMap[relVal]; !has {
-				fmtRowMap[relVal] = []maps.MapStr{}
-			}
-			fmtRowMap[relVal] = append(fmtRowMap[relVal], unDotRows)
+
+		unDotRows := fmtRow.UnDot()
+		fmtRows = append(fmtRows, unDotRows)
+
+		relVal := fmtRow.Get(rel.Key)
+		if k, ok := normalizeKey(relVal); ok {
+			fmtRowMap[k] = append(fmtRowMap[k], unDotRows)
 		}
 	}
 
-	// 追加到上一层
+	// 追加到上一层主表数据
 	varname := rel.Name
-	// utils.Dump(fmtRows, rel.Foreign, varname, fmtRowMap, prevRows)
 	for idx, prow := range prevRows {
-		id := prow.Get(rel.Foreign)
-		if rows, has := fmtRowMap[id]; has {
-			if _, has := prevRows[idx][varname]; !has {
-				prevRows[idx][varname] = []maps.MapStr{}
-			}
-			prevRows[idx][varname] = append(prevRows[idx][varname].([]maps.MapStr), rows...)
+		// 安全类型断言与初始化，遵循 golang-safety 准则
+		existing, ok := prevRows[idx][varname].([]maps.MapStr)
+		if !ok {
+			existing = []maps.MapStr{}
 		}
+
+		id := prow.Get(rel.Foreign)
+		if k, ok := normalizeKey(id); ok {
+			if matched, has := fmtRowMap[k]; has {
+				// 若用户指定了单父级上限，严格限制挂载条数，确保精确的按父级条数语义
+				if perParentLimit > 0 && len(matched) > perParentLimit {
+					existing = append(existing, matched[:perParentLimit]...)
+				} else {
+					existing = append(existing, matched...)
+				}
+			}
+		}
+		prevRows[idx][varname] = existing
 	}
 
 	*res = append(*res, fmtRows)
+}
+
+// normalizeKey 将各类数值/字符串主外键归一化为字符串，用于跨数据库驱动关联匹配
+func normalizeKey(val interface{}) (string, bool) {
+	if val == nil {
+		return "", false
+	}
+	switch v := val.(type) {
+	case string:
+		if v == "" || v == "<nil>" || v == "null" {
+			return "", false
+		}
+		return v, true
+	case int:
+		return strconv.Itoa(v), true
+	case int64:
+		return strconv.FormatInt(v, 10), true
+	case int32:
+		return strconv.FormatInt(int64(v), 10), true
+	case int16:
+		return strconv.FormatInt(int64(v), 10), true
+	case int8:
+		return strconv.FormatInt(int64(v), 10), true
+	case uint:
+		return strconv.FormatUint(uint64(v), 10), true
+	case uint64:
+		return strconv.FormatUint(v, 10), true
+	case uint32:
+		return strconv.FormatUint(uint64(v), 10), true
+	case uint16:
+		return strconv.FormatUint(uint64(v), 10), true
+	case uint8:
+		return strconv.FormatUint(uint64(v), 10), true
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return "", false
+		}
+		if v >= math.MinInt64 && v <= math.MaxInt64 && v == math.Trunc(v) {
+			return strconv.FormatInt(int64(v), 10), true
+		}
+		return strconv.FormatFloat(v, 'f', -1, 64), true
+	case float32:
+		fv := float64(v)
+		if math.IsNaN(fv) || math.IsInf(fv, 0) {
+			return "", false
+		}
+		if fv >= math.MinInt64 && fv <= math.MaxInt64 && fv == math.Trunc(fv) {
+			return strconv.FormatInt(int64(fv), 10), true
+		}
+		return strconv.FormatFloat(fv, 'f', -1, 32), true
+	case []byte:
+		if len(v) == 0 {
+			return "", false
+		}
+		return string(v), true
+	case fmt.Stringer:
+		s := v.String()
+		if s == "" || s == "<nil>" {
+			return "", false
+		}
+		return s, true
+	default:
+		s := fmt.Sprintf("%v", v)
+		if s == "" || s == "<nil>" {
+			return "", false
+		}
+		return s, true
+	}
 }

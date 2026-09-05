@@ -79,6 +79,45 @@ func TestSelectIsoStandardCompatibilityIsBounded(t *testing.T) {
 	}
 }
 
+func TestSelectIsoStandardWakeupLatency(t *testing.T) {
+	option := option()
+	option.Mode = "standard"
+	option.MinSize = 1
+	option.MaxSize = 1
+	option.DefaultTimeout = 500
+	option.HeapSizeLimit = 4294967296
+
+	prepareSetup(t, option)
+	defer Stop()
+
+	iso1, err := SelectIsoStandard(100 * time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	done := make(chan time.Duration, 1)
+
+	// Background worker waits for isolate
+	go func() {
+		iso2, err := SelectIsoStandard(500 * time.Millisecond)
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Errorf("wait failed: %v", err)
+			return
+		}
+		iso2.Dispose()
+		done <- elapsed
+	}()
+
+	// Hold for 2ms then release
+	time.Sleep(2 * time.Millisecond)
+	iso1.Dispose()
+
+	elapsed := <-done
+	t.Logf("Wakeup latency after 2ms release: %v", elapsed)
+}
+
 // go test -bench=BenchmarkSelectIsoStandard
 // go test -bench=BenchmarkSelectIsoStandard -benchmem -benchtime=5s
 // go test -bench=BenchmarkSelectIsoStandard -benchtime=5s
@@ -87,12 +126,14 @@ func BenchmarkSelectIsoStandard(b *testing.B) {
 	option.Mode = "standard"
 	option.HeapSizeLimit = 4294967296
 
-	b.ResetTimer()
-	var t *testing.T
-	prepare(t, option)
+	EnablePrecompile()
+	if err := Start(option); err != nil {
+		b.Fatal(err)
+	}
 	defer Stop()
 	log.SetLevel(log.FatalLevel)
 
+	b.ResetTimer()
 	// run the Call function b.N times
 	for n := 0; n < b.N; n++ {
 		iso, err := SelectIsoStandard(500 * time.Millisecond)
@@ -109,12 +150,14 @@ func BenchmarkSelectIsoStandardPB(b *testing.B) {
 	option.Mode = "standard"
 	option.HeapSizeLimit = 4294967296
 
-	b.ResetTimer()
-	var t *testing.T
-	prepare(t, option)
+	EnablePrecompile()
+	if err := Start(option); err != nil {
+		b.Fatal(err)
+	}
 	defer Stop()
 	log.SetLevel(log.FatalLevel)
 
+	b.ResetTimer()
 	// run the Call function b.N times
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
@@ -122,6 +165,36 @@ func BenchmarkSelectIsoStandardPB(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
+			iso.Dispose()
+		}
+	})
+	b.StopTimer()
+}
+
+// BenchmarkSelectIsoContention simulates high contention on a small isolate pool (max=2)
+func BenchmarkSelectIsoContention(b *testing.B) {
+	option := option()
+	option.Mode = "standard"
+	option.MinSize = 1
+	option.MaxSize = 2
+	option.HeapSizeLimit = 4294967296
+
+	EnablePrecompile()
+	if err := Start(option); err != nil {
+		b.Fatal(err)
+	}
+	defer Stop()
+	log.SetLevel(log.FatalLevel)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			iso, err := SelectIsoStandard(200 * time.Millisecond)
+			if err != nil {
+				continue
+			}
+			// simulate brief micro-work
+			time.Sleep(10 * time.Microsecond)
 			iso.Dispose()
 		}
 	})
