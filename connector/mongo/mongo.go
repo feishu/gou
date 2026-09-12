@@ -6,16 +6,16 @@ import (
 	"strings"
 
 	"github.com/yaoapp/gou/application"
+	"github.com/yaoapp/gou/connector/base"
 	"github.com/yaoapp/gou/helper"
 	"github.com/yaoapp/gou/types"
-	"github.com/yaoapp/xun/dbal/query"
-	"github.com/yaoapp/xun/dbal/schema"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // Connector the ConnectorDB struct
 type Connector struct {
+	base.NonSQL
 	id       string
 	file     string
 	Name     string          `json:"name,omitempty"`
@@ -65,16 +65,6 @@ func (m *Connector) Register(file string, id string, dsl []byte) error {
 // ID get connector id
 func (m *Connector) ID() string {
 	return m.id
-}
-
-// Query get connector query interface
-func (m *Connector) Query() (query.Query, error) {
-	return nil, nil
-}
-
-// Schema get connector schema interface
-func (m *Connector) Schema() (schema.Schema, error) {
-	return nil, nil
 }
 
 // Close connections

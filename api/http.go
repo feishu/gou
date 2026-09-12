@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	jsoniter "github.com/json-iterator/go"
@@ -20,7 +21,18 @@ import (
 
 // HTTPGuards 支持的中间件
 var HTTPGuards = map[string]gin.HandlerFunc{}
+var guardsLock sync.RWMutex
+
 var registeredOptions = map[string]bool{}
+var optionsLock sync.Mutex
+
+// GetGuard 获取中间件（并发安全）
+func GetGuard(name string) (gin.HandlerFunc, bool) {
+	guardsLock.RLock()
+	defer guardsLock.RUnlock()
+	handler, has := HTTPGuards[name]
+	return handler, has
+}
 
 // ProcessGuard guard process
 func ProcessGuard(name string, cors ...gin.HandlerFunc) gin.HandlerFunc {
@@ -150,7 +162,9 @@ func (http HTTP) Routes(router *gin.Engine, path string, allows ...string) {
 		path.Method = strings.ToUpper(path.Method)
 		http.Route(group, path, allows...)
 	}
+	optionsLock.Lock()
 	registeredOptions = map[string]bool{}
+	optionsLock.Unlock()
 }
 
 // Route 路径配置转换为路由
@@ -223,7 +237,7 @@ func (http HTTP) guard(handlers *[]gin.HandlerFunc, guard string, defaults strin
 		guards := strings.Split(guard, ",")
 		for _, name := range guards {
 			name = strings.TrimSpace(name)
-			if handler, has := HTTPGuards[name]; has {
+			if handler, has := GetGuard(name); has {
 				*handlers = append(*handlers, handler)
 			} else { // run process process
 				*handlers = append(*handlers, ProcessGuard(name))
@@ -234,10 +248,14 @@ func (http HTTP) guard(handlers *[]gin.HandlerFunc, guard string, defaults strin
 
 // setCorsOption 跨域许可
 func (http HTTP) setCorsOption(path string, allows map[string]bool, router gin.IRoutes) {
-	if _, has := registeredOptions[fmt.Sprintf("%s.%s", http.Name, path)]; has {
+	key := fmt.Sprintf("%s.%s", http.Name, path)
+	optionsLock.Lock()
+	if registeredOptions[key] {
+		optionsLock.Unlock()
 		return
 	}
-	registeredOptions[fmt.Sprintf("%s.%s", http.Name, path)] = true
+	registeredOptions[key] = true
+	optionsLock.Unlock()
 	http.method("OPTIONS", path, router, func(c *gin.Context) {
 		referer := c.Request.Referer()
 		if referer != "" {

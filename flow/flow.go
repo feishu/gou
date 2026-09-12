@@ -2,6 +2,7 @@ package flow
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/yaoapp/kun/log"
 
@@ -11,6 +12,7 @@ import (
 
 // Flows 已加载工作流列表
 var Flows = map[string]*Flow{}
+var lock sync.RWMutex
 
 // Load the flow
 func Load(file string, id string) (*Flow, error) {
@@ -27,6 +29,9 @@ func Load(file string, id string) (*Flow, error) {
 	}
 
 	flow.prepare()
+
+	lock.Lock()
+	defer lock.Unlock()
 	Flows[id] = &flow
 	return Flows[id], nil
 }
@@ -63,28 +68,55 @@ func (flow *Flow) Reload() (*Flow, error) {
 		return nil, err
 	}
 
+	lock.Lock()
+	defer lock.Unlock()
 	flow = new
 	Flows[flow.Name] = new
 	return flow, nil
 }
 
-// WithSID 设定会话ID
+// WithSID 设定会话ID（返回安全的局部隔离副本，杜绝多协程指针踩踏）
 func (flow *Flow) WithSID(sid string) *Flow {
-	flow.Sid = sid
-	return flow
+	copy := *flow
+	copy.Sid = sid
+	return &copy
 }
 
-// WithGlobal 设定全局变量
+// WithGlobal 设定全局变量（返回安全的局部隔离副本，杜绝多协程指针踩踏）
 func (flow *Flow) WithGlobal(global map[string]interface{}) *Flow {
-	flow.Global = global
-	return flow
+	copy := *flow
+	copy.Global = global
+	return &copy
 }
 
 // Select 读取已加载Flow
 func Select(name string) (*Flow, error) {
+	lock.RLock()
+	defer lock.RUnlock()
+
 	flow, has := Flows[name]
 	if !has {
 		return nil, fmt.Errorf("flows.%s not loaded", name)
 	}
 	return flow, nil
 }
+
+// Count 获取已加载 Flow 数量
+func Count() int {
+	lock.RLock()
+	defer lock.RUnlock()
+	return len(Flows)
+}
+
+// Range 安全遍历已加载 Flow
+func Range(fn func(id string, f *Flow) bool) {
+	lock.RLock()
+	defer lock.RUnlock()
+
+	for id, f := range Flows {
+		if !fn(id, f) {
+			break
+		}
+	}
+}
+

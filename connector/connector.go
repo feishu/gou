@@ -24,15 +24,11 @@ var rwlock sync.RWMutex // Use RWMutex for better concurrency
 
 // LoadSync load connector sync
 func LoadSync(file string, id string) (Connector, error) {
-	rwlock.Lock()
-	defer rwlock.Unlock()
 	return Load(file, id)
 }
 
 // LoadSourceSync load connector sync
 func LoadSourceSync(source []byte, id string, file string) (Connector, error) {
-	rwlock.Lock()
-	defer rwlock.Unlock()
 	return LoadSource(source, id, file)
 }
 
@@ -62,6 +58,9 @@ func LoadSource(source []byte, id string, file string) (Connector, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	rwlock.Lock()
+	defer rwlock.Unlock()
 
 	// The AI connectors
 	if dsl.Type == "openai" || dsl.Type == "fastembed" {
@@ -95,27 +94,57 @@ func New(typ string, id string, dsl []byte) (Connector, error) {
 		return nil, err
 	}
 
+	rwlock.Lock()
+	defer rwlock.Unlock()
+
 	Connectors[id] = c
 	return Connectors[id], nil
 }
 
 // Select a connector
 func Select(id string) (Connector, error) {
+	rwlock.RLock()
+	defer rwlock.RUnlock()
+
 	connector, has := Connectors[id]
 	if !has {
-		return nil, fmt.Errorf("connector %s not loaded", id)
+		return nil, fmt.Errorf("connector %s not loaded: %w", id, ErrConnectorNotFound)
 	}
 	return connector, nil
 }
 
 // Remove a connector
 func Remove(id string) error {
+	rwlock.Lock()
+	defer rwlock.Unlock()
+
 	connector, has := Connectors[id]
 	if !has {
-		return fmt.Errorf("connector %s not loaded", id)
+		return fmt.Errorf("connector %s not loaded: %w", id, ErrConnectorNotFound)
 	}
+	delete(Connectors, id)
 	return connector.Close()
 }
+
+// Range 安全遍历所有已注册连接器
+func Range(fn func(id string, c Connector) bool) {
+	rwlock.RLock()
+	defer rwlock.RUnlock()
+
+	for id, c := range Connectors {
+		if !fn(id, c) {
+			break
+		}
+	}
+}
+
+// Count 获取已注册连接器数量
+func Count() int {
+	rwlock.RLock()
+	defer rwlock.RUnlock()
+	return len(Connectors)
+}
+
 
 func makeConnector(typ string) (Connector, error) {
 

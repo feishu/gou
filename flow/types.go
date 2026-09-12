@@ -36,4 +36,6 @@ type Context struct {
 	Res     map[string]interface{}
 	Context *context.Context
 	Cancel  context.CancelFunc
+	Sid     string                 // 会话ID (请求级隔离)
+	Global  map[string]interface{} // 全局变量 (请求级隔离)
 }

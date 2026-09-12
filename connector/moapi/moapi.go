@@ -2,14 +2,14 @@ package moapi
 
 import (
 	"github.com/yaoapp/gou/application"
+	"github.com/yaoapp/gou/connector/base"
 	"github.com/yaoapp/gou/helper"
 	"github.com/yaoapp/gou/types"
-	"github.com/yaoapp/xun/dbal/query"
-	"github.com/yaoapp/xun/dbal/schema"
 )
 
 // Connector connector
 type Connector struct {
+	base.NonSQL
 	id      string
 	file    string
 	Name    string  `json:"name"`
@@ -47,16 +47,6 @@ func (o *Connector) Is(typ int) bool {
 // ID get connector id
 func (o *Connector) ID() string {
 	return o.id
-}
-
-// Query get connector query interface
-func (o *Connector) Query() (query.Query, error) {
-	return nil, nil
-}
-
-// Schema get connector schema interface
-func (o *Connector) Schema() (schema.Schema, error) {
-	return nil, nil
 }
 
 // Close connections

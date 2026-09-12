@@ -7,15 +7,15 @@ import (
 
 	"github.com/go-redis/redis/v8"
 	"github.com/yaoapp/gou/application"
+	"github.com/yaoapp/gou/connector/base"
 	"github.com/yaoapp/gou/helper"
 	"github.com/yaoapp/gou/types"
 	"github.com/yaoapp/kun/any"
-	"github.com/yaoapp/xun/dbal/query"
-	"github.com/yaoapp/xun/dbal/schema"
 )
 
 // Connector connector
 type Connector struct {
+	base.NonSQL
 	id      string
 	file    string
 	Name    string        `json:"name"`
@@ -61,16 +61,6 @@ func (r *Connector) Is(typ int) bool {
 // ID get connector id
 func (r *Connector) ID() string {
 	return r.id
-}
-
-// Query get connector query interface
-func (r *Connector) Query() (query.Query, error) {
-	return nil, nil
-}
-
-// Schema get connector schema interface
-func (r *Connector) Schema() (schema.Schema, error) {
-	return nil, nil
 }
 
 // Close connections

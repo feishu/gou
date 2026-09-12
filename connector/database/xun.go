@@ -75,6 +75,11 @@ func (x *Xun) Is(typ int) bool {
 	return 1 == typ
 }
 
+// IsSQL 显式声明该连接器具备 SQL 数据库操作能力
+func (x *Xun) IsSQL() bool {
+	return true
+}
+
 // ID get connector id
 func (x *Xun) ID() string {
 	return x.id

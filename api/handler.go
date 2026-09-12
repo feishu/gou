@@ -25,82 +25,85 @@ import (
 // defaultHandler default handler
 func (path Path) defaultHandler(getArgs argsHandler) func(c *gin.Context) {
 	return func(c *gin.Context) {
-
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 		path.setPayload(c)
 		var status int = path.Out.Status
 		var contentType = path.reqContentType(c) // Get the defined content type at API DSL
 
-		chRes := make(chan interface{}, 1)
-		go path.execProcess(ctx, chRes, c, getArgs)
-
-		select {
-		case resp := <-chRes:
-			close(chRes)
-			if resp == nil {
-				c.Done()
+		resp, err := path.executeProcess(c.Request.Context(), c, getArgs)
+		if err != nil {
+			if c.Request.Context().Err() != nil {
+				c.Abort()
 				return
 			}
-
-			// Set Headers and renew Content-Type
-			contentType = path.setResponseHeaders(c, resp, contentType)
-
-			// Format Body
-			body := resp
-			if path.Out.Body != nil {
-				res := any.Of(resp)
-				if res.IsMap() {
-					data := res.Map().MapStrAny.Dot()
-					body = helper.Bind(path.Out.Body, data)
-				}
-			}
-
-			// Release Memory
-			defer func() { resp = nil; body = nil }()
-			switch data := body.(type) {
-			case maps.Map, map[string]interface{}, []interface{}, []maps.Map, []map[string]interface{}:
-				defer func() { data = nil }()
-				c.JSON(status, data)
-				c.Done()
-				return
-
-			case []byte:
-				defer func() { data = nil }()
-				c.Data(status, contentType, data)
-				c.Done()
-				return
-
-			case io.ReadCloser:
-				defer data.Close()
-				c.DataFromReader(status, -1, contentType, data, nil)
-				c.Done()
-				return
-
-			case error:
-				ex := exception.Err(data, 500)
-				c.JSON(ex.Code, gin.H{"message": ex.Message, "code": ex.Code})
-
-			case nil:
-				c.Done()
-				return
-
-			default:
-				if strings.HasPrefix(contentType, "application/json") {
-					c.JSON(status, body)
-					c.Done()
-					return
-				}
-
-				c.String(status, "%v", body)
-				c.Done()
-				return
-			}
-
-		case <-c.Request.Context().Done():
-			c.Abort()
+			ex := exception.Err(err, 500)
+			c.JSON(ex.Code, gin.H{"message": ex.Message, "code": ex.Code})
+			c.Done()
 			return
 		}
+
+		if resp == nil {
+			c.Done()
+			return
+		}
+
+		path.writeResponse(c, resp, status, contentType)
+	}
+}
+
+// writeResponse format and write response body and headers
+func (path Path) writeResponse(c *gin.Context, resp interface{}, status int, contentType string) {
+	// Set Headers and renew Content-Type
+	contentType = path.setResponseHeaders(c, resp, contentType)
+
+	// Format Body
+	body := resp
+	if path.Out.Body != nil {
+		res := any.Of(resp)
+		if res.IsMap() {
+			data := res.Map().MapStrAny.Dot()
+			body = helper.Bind(path.Out.Body, data)
+		}
+	}
+
+	// Release Memory
+	defer func() { resp = nil; body = nil }()
+	switch data := body.(type) {
+	case maps.Map, map[string]interface{}, []interface{}, []maps.Map, []map[string]interface{}:
+		defer func() { data = nil }()
+		c.JSON(status, data)
+		c.Done()
+		return
+
+	case []byte:
+		defer func() { data = nil }()
+		c.Data(status, contentType, data)
+		c.Done()
+		return
+
+	case io.ReadCloser:
+		defer data.Close()
+		c.DataFromReader(status, -1, contentType, data, nil)
+		c.Done()
+		return
+
+	case error:
+		ex := exception.Err(data, 500)
+		c.JSON(ex.Code, gin.H{"message": ex.Message, "code": ex.Code})
+
+	case nil:
+		c.Done()
+		return
+
+	default:
+		if strings.HasPrefix(contentType, "application/json") {
+			c.JSON(status, body)
+			c.Done()
+			return
+		}
+
+		c.String(status, "%v", body)
+		c.Done()
+		return
 	}
 }
 
@@ -119,15 +122,21 @@ func (path Path) processHandler() func(c *gin.Context) {
 // redirectHandler default handler
 func (path Path) redirectHandler(getArgs argsHandler) func(c *gin.Context) {
 	return func(c *gin.Context) {
-
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
 		path.setPayload(c)
 		contentType := path.reqContentType(c)
 
-		// run process
-		resp := path.runProcess(ctx, c, getArgs)
+		// run process with request context
+		resp, err := path.executeProcess(c.Request.Context(), c, getArgs)
+		if err != nil {
+			if c.Request.Context().Err() != nil {
+				c.Abort()
+				return
+			}
+			ex := exception.Err(err, 500)
+			c.JSON(ex.Code, gin.H{"message": ex.Message, "code": ex.Code})
+			c.Done()
+			return
+		}
 
 		// Response Headers
 		path.setResponseHeaders(c, resp, contentType)
@@ -280,62 +289,51 @@ func (path Path) runStreamScript(ctx context.Context, c *gin.Context, getArgs ar
 	}
 }
 
-func (path Path) execProcess(ctx context.Context, chRes chan<- interface{}, c *gin.Context, getArgs argsHandler) {
-
+func (path Path) executeProcess(ctx context.Context, c *gin.Context, getArgs argsHandler) (interface{}, error) {
 	var args []interface{} = getArgs(c)
-	var process, err = process.Of(path.Process, args...)
+	p, err := process.Of(path.Process, args...)
 	if err != nil {
 		log.Error("[Path] %s %s", path.Path, err.Error())
-		chRes <- err
+		return nil, err
 	}
-	defer process.Dispose()
+	defer p.Dispose()
 
 	if sid, has := c.Get("__sid"); has { // 设定会话ID
 		if sid, ok := sid.(string); ok {
-			process.WithSID(sid)
+			p.WithSID(sid)
 		}
 	}
 
 	if global, has := c.Get("__global"); has { // 设定全局变量
 		if global, ok := global.(map[string]interface{}); ok {
-			process.WithGlobal(global)
+			p.WithGlobal(global)
 		}
 	}
 
-	process.WithContext(ctx)
-	err = process.Execute()
+	p.WithContext(ctx)
+	err = p.Execute()
 	if err != nil {
 		log.Error("[Path] %s %s", path.Path, err.Error())
+		return nil, err
+	}
+	return p.Value(), nil
+}
+
+func (path Path) execProcess(ctx context.Context, chRes chan<- interface{}, c *gin.Context, getArgs argsHandler) {
+	val, err := path.executeProcess(ctx, c, getArgs)
+	if err != nil {
 		chRes <- err
 		return
 	}
-	chRes <- process.Value()
+	chRes <- val
 }
 
 func (path Path) runProcess(ctx context.Context, c *gin.Context, getArgs argsHandler) interface{} {
-	var args []interface{} = getArgs(c)
-	var process = process.New(path.Process, args...)
-	defer process.Dispose()
-
-	if sid, has := c.Get("__sid"); has { // 设定会话ID
-		if sid, ok := sid.(string); ok {
-			process.WithSID(sid)
-		}
-	}
-
-	if global, has := c.Get("__global"); has { // 设定全局变量
-		if global, ok := global.(map[string]interface{}); ok {
-			process.WithGlobal(global)
-		}
-	}
-
-	process.WithContext(ctx)
-	err := process.Execute()
+	val, err := path.executeProcess(ctx, c, getArgs)
 	if err != nil {
-		log.Error("[Path] %s %s", path.Path, err.Error())
 		exception.Err(err, 500).Throw()
 	}
-	return process.Value()
+	return val
 }
 
 func (path Path) reqContentType(c *gin.Context) string {

@@ -12,19 +12,41 @@ import (
 
 // Exec execute flow
 func (flow *Flow) Exec(args ...interface{}) (interface{}, error) {
+	return flow.ExecWithContext(context.Background(), flow.Sid, flow.Global, args...)
+}
 
-	res := map[string]interface{}{} // 结果集
-	ctx, cancel := context.WithCancel(context.Background())
+// ExecWithContext execute flow with isolated context, sid and global
+func (flow *Flow) ExecWithContext(ctx context.Context, sid string, global map[string]interface{}, args ...interface{}) (interface{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if sid == "" {
+		sid = flow.Sid
+	}
+	if global == nil {
+		global = flow.Global
+	}
+
+	res := map[string]interface{}{} // 局部结果集，每个并发调用独立
+	innerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	flowCtx := &Context{
-		Context: &ctx,
+		Context: &innerCtx,
 		Cancel:  cancel,
 		Res:     res,
 		In:      args,
+		Sid:     sid,
+		Global:  global,
 	}
 
 	flowProcess := "flows." + flow.Name
 	for i, node := range flow.Nodes {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
 
 		if strings.HasPrefix(node.Process, flowProcess) {
 			return nil, fmt.Errorf("cannot call self flow(%s)", node.Process)
@@ -60,14 +82,22 @@ func (flow *Flow) FormatResult(ctx *Context) (interface{}, error) {
 	if flow.Output == nil {
 		return ctx.Res, nil
 	}
-	data := maps.Map{"$in": ctx.In, "$res": ctx.Res, "$global": flow.Global}
+	global := ctx.Global
+	if global == nil {
+		global = flow.Global
+	}
+	data := maps.Map{"$in": ctx.In, "$res": ctx.Res, "$global": global}
 	data = ctx.ExtendIn(data).Dot()
 	return helper.Bind(flow.Output, data), nil
 }
 
 // ExecNode Execute node
 func (flow *Flow) ExecNode(node *Node, ctx *Context, prev int) ([]interface{}, error) {
-	data := maps.Map{"$in": ctx.In, "$res": ctx.Res, "$global": flow.Global}
+	global := ctx.Global
+	if global == nil {
+		global = flow.Global
+	}
+	data := maps.Map{"$in": ctx.In, "$res": ctx.Res, "$global": global}
 	data = ctx.ExtendIn(data).Dot()
 	var outs = []interface{}{}
 	var err error
@@ -117,13 +147,24 @@ func (flow *Flow) RunProcess(node *Node, ctx *Context, data maps.Map) (interface
 	}
 
 	if node.Process != "" {
-		process := process.New(node.Process, args...).WithGlobal(flow.Global).WithSID(flow.Sid)
-		resp = process.Run()
+		sid := ctx.Sid
+		if sid == "" {
+			sid = flow.Sid
+		}
+		global := ctx.Global
+		if global == nil {
+			global = flow.Global
+		}
 
-		// 当使用 Session start 设置SID时
-		// 设置SID (这个逻辑需要优化)
-		if flow.Sid == "" && process.Sid != "" {
-			flow.WithSID(process.Sid)
+		p := process.New(node.Process, args...).WithGlobal(global).WithSID(sid)
+		if ctx.Context != nil && *ctx.Context != nil {
+			p = p.WithContext(*ctx.Context)
+		}
+		resp = p.Run()
+
+		// 当使用 Session start 设置SID时，仅记录到当前请求局部上下文，绝不踩踏全局指针！
+		if ctx.Sid == "" && p.Sid != "" {
+			ctx.Sid = p.Sid
 		}
 	}
 

@@ -120,11 +120,15 @@ func SetRoutes(router *gin.Engine, path string, allows ...string) {
 
 // SetGuards set guards
 func SetGuards(guards map[string]gin.HandlerFunc) {
+	guardsLock.Lock()
+	defer guardsLock.Unlock()
 	HTTPGuards = guards
 }
 
 // AddGuard add guard
 func AddGuard(name string, guard gin.HandlerFunc) {
+	guardsLock.Lock()
+	defer guardsLock.Unlock()
 	HTTPGuards[name] = guard
 }
 

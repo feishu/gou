@@ -21,15 +21,11 @@ var rwlock sync.RWMutex // Use RWMutex for better concurrency
 
 // LoadSync load store sync
 func LoadSync(file string, name string) (Store, error) {
-	rwlock.Lock()
-	defer rwlock.Unlock()
 	return Load(file, name)
 }
 
 // LoadSourceSync load store from source sync
 func LoadSourceSync(data []byte, id string, file string) (Store, error) {
-	rwlock.Lock()
-	defer rwlock.Unlock()
 	return LoadSource(data, id, file)
 }
 
@@ -56,26 +52,32 @@ func LoadSource(data []byte, id string, file string) (Store, error) {
 		if err != nil {
 			return nil, err
 		}
+		rwlock.Lock()
 		Pools[id] = stor
-		return Pools[id], nil
+		rwlock.Unlock()
+		return stor, nil
 	}
 
-	connector, has := connector.Connectors[inst.Connector]
-	if !has {
-		return nil, fmt.Errorf("Store %s Connector:%s was not loaded", id, inst.Connector)
+	c, err := connector.Select(inst.Connector)
+	if err != nil {
+		return nil, fmt.Errorf("Store %s Connector:%s was not loaded: %w", id, inst.Connector, err)
 	}
 
-	stor, err := New(connector, inst.Option)
+	stor, err := New(c, inst.Option)
 	if err != nil {
 		return nil, err
 	}
 
+	rwlock.Lock()
 	Pools[id] = stor
-	return Pools[id], nil
+	rwlock.Unlock()
+	return stor, nil
 }
 
 // Select Select loaded kv store
 func Select(name string) Store {
+	rwlock.RLock()
+	defer rwlock.RUnlock()
 	store, has := Pools[name]
 	if !has {
 		exception.New("Store:%s does not load", 500, name).Throw()
@@ -85,11 +87,38 @@ func Select(name string) Store {
 
 // Get Get the store from the pool
 func Get(name string) (Store, error) {
+	rwlock.RLock()
+	defer rwlock.RUnlock()
 	store, has := Pools[name]
 	if !has {
 		return nil, fmt.Errorf("Store:%s does not load", name)
 	}
 	return store, nil
+}
+
+// Remove removes the store from pool
+func Remove(id string) {
+	rwlock.Lock()
+	defer rwlock.Unlock()
+	delete(Pools, id)
+}
+
+// Count returns the number of loaded stores
+func Count() int {
+	rwlock.RLock()
+	defer rwlock.RUnlock()
+	return len(Pools)
+}
+
+// Range ranges over the loaded stores safely
+func Range(f func(id string, stor Store) bool) {
+	rwlock.RLock()
+	defer rwlock.RUnlock()
+	for id, stor := range Pools {
+		if !f(id, stor) {
+			break
+		}
+	}
 }
 
 // New create a store via connector

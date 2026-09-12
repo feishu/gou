@@ -18,9 +18,7 @@ func processFlows(process *process.Process) interface{} {
 		return nil
 	}
 
-	flow.WithGlobal(process.Global).WithSID(process.Sid)
-
-	res, err := flow.Exec(process.Args...)
+	res, err := flow.ExecWithContext(process.Context, process.Sid, process.Global, process.Args...)
 	if err != nil {
 		exception.New(err.Error(), 500).Throw()
 	}

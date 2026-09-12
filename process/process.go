@@ -67,26 +67,38 @@ func (process *Process) Execute() (err error) {
 		return nil
 	}
 
-	// Slow-Path: monitor with external context
-	done := make(chan struct{})
+	// Slow-Path: monitor with external context via isolated buffered channel
+	type execResult struct {
+		value interface{}
+		err   error
+	}
+
+	resChan := make(chan execResult, 1)
 	go func() {
-		defer close(done)
+		var subErr error
+		var subVal interface{}
 		defer func() {
 			recovered := recover()
-			err = exception.Catch(recovered)
-			if err != nil {
-				exception.DebugPrint(err, "%s", process)
+			if recovered != nil {
+				subErr = exception.Catch(recovered)
+				if subErr != nil {
+					exception.DebugPrint(subErr, "%s", process)
+				}
 			}
+			resChan <- execResult{value: subVal, err: subErr}
 		}()
-		value := hd(process)
-		process._val = &value
+		subVal = hd(process)
 	}()
 
 	select {
 	case <-process.Context.Done():
 		return process.Context.Err()
-	case <-done:
-		return err
+	case res := <-resChan:
+		if res.err != nil {
+			return res.err
+		}
+		process._val = &res.value
+		return nil
 	}
 }
 
@@ -102,12 +114,8 @@ func (process *Process) Dispose() {
 	}
 	if process.Runtime != nil {
 		process.Runtime.Dispose()
+		process.Runtime = nil
 	}
-
-	process.Args = nil
-	process.Global = nil
-	process.Context = nil
-	process.Runtime = nil
 	process._val = nil
 }
 
@@ -168,39 +176,25 @@ func (process *Process) Exec() (value interface{}, err error) {
 
 // Register register a process handler
 func Register(name string, handler Handler) {
-	name = strings.ToLower(name)
-	Handlers[name] = handler
+	defaultKernel.Register(name, handler)
 }
 
 // RegisterGroup register a process handler group
 func RegisterGroup(name string, group map[string]Handler) {
-	for method, handler := range group {
-		id := fmt.Sprintf("%s.%s", strings.ToLower(name), strings.ToLower(method))
-		Handlers[id] = handler
-	}
+	defaultKernel.RegisterGroup(name, group)
 }
 
 // Alias set an alias a process
 func Alias(name string, alias string) {
-	name = strings.ToLower(name)
-	alias = strings.ToLower(alias)
-	if _, has := Handlers[name]; has {
-		Handlers[alias] = Handlers[name]
-		return
+	err := defaultKernel.Alias(name, alias)
+	if err != nil {
+		exception.New("Process: %s does not exist", 404, name).Throw()
 	}
-	exception.New("Process: %s does not exist", 404, name).Throw()
 }
 
 // Exists check if the process exists
 func Exists(name string) bool {
-
-	// Exclude the scripts, assistants, agents, ai, services
-	if strings.HasPrefix(name, "scripts.") || strings.HasPrefix(name, "assistants.") || strings.HasPrefix(name, "agents.") || strings.HasPrefix(name, "ai.") || strings.HasPrefix(name, "services.") {
-		return true
-	}
-
-	name = strings.ToLower(name)
-	return Handlers[name] != nil
+	return defaultKernel.Exists(name)
 }
 
 // WithSID set the session id
@@ -251,8 +245,8 @@ func (process Process) String() string {
 
 // handler get the process handler
 func (process *Process) handler() (Handler, error) {
-	if hander, has := Handlers[process.Handler]; has && hander != nil {
-		return hander, nil
+	if hd, has := defaultKernel.Lookup(process.Context, process.Handler); has && hd != nil {
+		return defaultKernel.ApplyInterceptors(hd), nil
 	}
 	return nil, fmt.Errorf("Exception|404:%s Handler -> %s not found", process.Name, process.Handler)
 }

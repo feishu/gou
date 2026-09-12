@@ -271,6 +271,12 @@ func (context *Context) Close() error {
 	if runner != nil {
 		if !runnerUsed {
 			runner.Reset()
+		} else {
+			// 防御性复位：若 runner 未处于就绪状态，确保触发 Reset 回收
+			status, _ := runner.snapshot()
+			if status != RunnerStatusReady && status != RunnerStatusDestroy {
+				runner.Reset()
+			}
 		}
 		return nil
 	}

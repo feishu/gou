@@ -2,6 +2,8 @@ package process
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -355,4 +357,120 @@ func TestProcessExecuteSlowPathTimeout(t *testing.T) {
 	err := p.Execute()
 	assert.Error(t, err)
 	assert.Equal(t, context.DeadlineExceeded, err)
+}
+
+func TestConcurrentHandlersAccess(t *testing.T) {
+	prepare(t)
+	var wg sync.WaitGroup
+
+	for i := 0; i < 50; i++ {
+		wg.Add(3)
+		idx := i
+
+		// 并发注册
+		go func() {
+			defer wg.Done()
+			name := fmt.Sprintf("unit.test.concurrent_%d", idx)
+			Register(name, func(p *Process) interface{} {
+				return idx
+			})
+		}()
+
+		// 并发查询存在性
+		go func() {
+			defer wg.Done()
+			_ = Exists("unit.test.prepare")
+			_ = Exists(fmt.Sprintf("unit.test.concurrent_%d", idx))
+		}()
+
+		// 并发调用执行
+		go func() {
+			defer wg.Done()
+			p := New("unit.test.prepare", "test")
+			_ = p.Execute()
+			_ = p.Value()
+		}()
+	}
+
+	wg.Wait()
+}
+
+func TestContextTestScopeMockIsolation(t *testing.T) {
+	prepare(t)
+
+	// 全局注册原实现
+	Register("unit.test.user_service", func(p *Process) interface{} {
+		return "real_production_user"
+	})
+
+	// 1. 无 context 默认调用返回真实实现
+	pNormal := New("unit.test.user_service")
+	assert.NoError(t, pNormal.Execute())
+	assert.Equal(t, "real_production_user", pNormal.Value())
+
+	// 2. 通过 WithTestScope 注入局部 Mock
+	mockCtx := WithTestScope(context.Background(), map[string]Handler{
+		"unit.test.user_service": func(p *Process) interface{} {
+			return "mocked_test_user"
+		},
+	})
+
+	pMocked := NewWithContext(mockCtx, "unit.test.user_service")
+	assert.NoError(t, pMocked.Execute())
+	assert.Equal(t, "mocked_test_user", pMocked.Value())
+
+	// 3. 验证全局状态未受污染
+	pVerify := New("unit.test.user_service")
+	assert.NoError(t, pVerify.Execute())
+	assert.Equal(t, "real_production_user", pVerify.Value(), "全局 Handler 必须不受 TestScope 污染")
+
+	// 4. 并发协程隔离验证：协程 A 跑 mock，协程 B 跑真实实现
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			p := NewWithContext(mockCtx, "unit.test.user_service")
+			assert.NoError(t, p.Execute())
+			assert.Equal(t, "mocked_test_user", p.Value())
+		}()
+		go func() {
+			defer wg.Done()
+			p := New("unit.test.user_service")
+			assert.NoError(t, p.Execute())
+			assert.Equal(t, "real_production_user", p.Value())
+		}()
+	}
+	wg.Wait()
+}
+
+func TestProcessInterceptorPipeline(t *testing.T) {
+	prepare(t)
+	kernel := NewKernel()
+
+	var order []string
+	kernel.Use(func(p *Process, next Handler) interface{} {
+		order = append(order, "before_1")
+		res := next(p)
+		order = append(order, "after_1")
+		return res
+	})
+
+	kernel.Use(func(p *Process, next Handler) interface{} {
+		order = append(order, "before_2")
+		res := next(p)
+		order = append(order, "after_2")
+		return res
+	})
+
+	baseHandler := func(p *Process) interface{} {
+		order = append(order, "core")
+		return "result"
+	}
+
+	chained := kernel.ApplyInterceptors(baseHandler)
+	val := chained(&Process{Name: "test"})
+
+	assert.Equal(t, "result", val)
+	assert.Equal(t, []string{"before_1", "before_2", "core", "after_2", "after_1"}, order)
 }
