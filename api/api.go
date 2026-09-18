@@ -42,9 +42,10 @@ func LoadSource(file string, data []byte, id string, guard ...string) (*API, err
 		http.Group = strings.ReplaceAll(strings.ToLower(id), ".", "/")
 	}
 
-	// Validate API
+	// Validate API and Normalize MCP
 	uniquePathCheck := map[string]bool{}
-	for _, path := range http.Paths {
+	for i, path := range http.Paths {
+		http.Paths[i].NormalizeMCP(http.Group, id)
 		unique := fmt.Sprintf("%s.%s", path.Method, path.Path)
 		if _, has := uniquePathCheck[unique]; has {
 			log.Error("[API] Load %s is already registered", id)

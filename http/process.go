@@ -220,6 +220,9 @@ func processHTTPSend(process *process.Process) interface{} {
 	}
 
 	req := New(process.ArgsString(1))
+	if process.Context != nil {
+		req.WithContext(process.Context)
+	}
 
 	if process.NumOfArgs() > 3 {
 		values, err := cast.AnyToURLValues(process.Args[3])
@@ -370,6 +373,9 @@ func processHTTPStream(p *process.Process) interface{} {
 func processHTTPNew(process *process.Process, from int) (*Request, *Response) {
 
 	req := New(process.ArgsString(0))
+	if process.Context != nil {
+		req.WithContext(process.Context)
+	}
 
 	if process.NumOfArgs() > from {
 		values, err := cast.AnyToURLValues(process.Args[from])

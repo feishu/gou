@@ -13,6 +13,7 @@ func ExportFunction(iso *v8go.Isolate) *v8go.FunctionTemplate {
 
 // exec
 func exec(info *v8go.FunctionCallbackInfo) *v8go.Value {
+	defer info.Release()
 
 	jsArgs := info.Args()
 	if len(jsArgs) < 1 {
@@ -45,13 +46,13 @@ func exec(info *v8go.FunctionCallbackInfo) *v8go.Value {
 
 	var goRes interface{}
 	if goctx := bridge.GoContext(info.Context()); goctx != nil {
-		err = proc.WithContext(goctx).Execute()
-		if err == nil {
-			goRes = proc.Value()
-			proc.Release()
-		}
-	} else {
-		goRes, err = proc.Exec()
+		proc.WithContext(goctx)
+	}
+
+	err = proc.ExecuteSync()
+	if err == nil {
+		goRes = proc.Value()
+		proc.Release()
 	}
 
 	if err != nil {

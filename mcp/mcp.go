@@ -7,6 +7,7 @@ import (
 	"github.com/yaoapp/gou/application"
 	"github.com/yaoapp/gou/helper"
 	"github.com/yaoapp/gou/mcp/client"
+	"github.com/yaoapp/gou/mcp/server"
 	"github.com/yaoapp/gou/mcp/types"
 	"github.com/yaoapp/kun/exception"
 )
@@ -19,6 +20,11 @@ var servers = map[string]Server{}
 
 // clientsLock protects the clients map from concurrent access
 var clientsLock sync.RWMutex
+
+// GetServer 获取指定分组的 MCP Server 实例
+func GetServer(group string) *server.Server {
+	return server.GetServer(group)
+}
 
 // LoadServer load the mcp server
 func LoadServer(path, id string) (Server, error) {

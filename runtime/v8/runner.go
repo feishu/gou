@@ -44,6 +44,12 @@ type Runner struct {
 	global     map[string]interface{}
 	invocation runnerInvocation
 	caches     map[string]*v8go.Object
+	scripts    map[string]*runnerScriptEntry
+}
+
+type runnerScriptEntry struct {
+	script  *v8go.UnboundScript
+	version uint64
 }
 
 var runnerHealthChecker = func(runner *Runner) bool {
@@ -91,6 +97,7 @@ func NewRunner(keepalive bool, owner *Dispatcher) *Runner {
 		destroyed:  make(chan struct{}),
 		keepalive:  keepalive,
 		status:     RunnerStatusInit,
+		scripts:    make(map[string]*runnerScriptEntry),
 	}
 }
 
@@ -126,6 +133,7 @@ func (runner *Runner) Start(ready chan error) error {
 	runner.ctx = ctx
 	runner.tmpl = tmpl
 	runner.inspector = inspector
+	runner.scripts = make(map[string]*runnerScriptEntry)
 	runner.status = RunnerStatusReady
 	runner.mu.Unlock()
 
@@ -313,11 +321,63 @@ func (runner *Runner) _exec() {
 		source = scriptTarget.scriptSource()
 		origin = scriptTarget.scriptURL()
 	}
-	instance, err := iso.CompileUnboundScript(source, origin, v8go.CompileOptions{})
-	if err != nil {
-		runner.chResp <- err
-		return
+
+	var instance *v8go.UnboundScript
+	var err error
+
+	if scriptTarget != nil {
+		// Live debugging target: compile fresh without caching
+		instance, err = iso.CompileUnboundScript(source, origin, v8go.CompileOptions{})
+		if err != nil {
+			runner.chResp <- err
+			return
+		}
+	} else {
+		// Tier 1: Check Runner-local UnboundScript cache
+		runner.mu.Lock()
+		cachedEntry, hit := runner.scripts[inv.script.ID]
+		runner.mu.Unlock()
+
+		if hit && cachedEntry != nil && cachedEntry.version == inv.script.Version() {
+			instance = cachedEntry.script
+		} else {
+			// Tier 2: Check global Script CodeCache
+			cachedData := inv.script.GetCodeCache()
+			if cachedData != nil {
+				opts := v8go.CompileOptions{CachedData: cachedData}
+				instance, err = iso.CompileUnboundScript(source, origin, opts)
+				if err != nil || (opts.CachedData != nil && opts.CachedData.Rejected) {
+					// Fallback to fresh compilation if cached data was rejected
+					instance, err = iso.CompileUnboundScript(source, origin, v8go.CompileOptions{Mode: v8go.CompileModeEager})
+					if err == nil {
+						inv.script.SetCodeCache(instance.CreateCodeCache())
+					}
+				}
+			} else {
+				// First compilation: compile eagerly and seed global CodeCache for all runners
+				instance, err = iso.CompileUnboundScript(source, origin, v8go.CompileOptions{Mode: v8go.CompileModeEager})
+				if err == nil {
+					inv.script.SetCodeCache(instance.CreateCodeCache())
+				}
+			}
+
+			if err != nil {
+				runner.chResp <- err
+				return
+			}
+
+			// Store in Runner-local cache
+			runner.mu.Lock()
+			if runner.scripts != nil {
+				runner.scripts[inv.script.ID] = &runnerScriptEntry{
+					script:  instance,
+					version: inv.script.Version(),
+				}
+			}
+			runner.mu.Unlock()
+		}
 	}
+
 	v, err := instance.Run(ctx)
 	if err != nil {
 		runner.chResp <- err
@@ -361,6 +421,7 @@ func (runner *Runner) _exec() {
 		runner.chResp <- err
 		return
 	}
+	defer jsRes.Release()
 
 	goRes, err := bridge.GoValue(jsRes, ctx)
 	if err != nil {
@@ -392,6 +453,7 @@ func (runner *Runner) destroy() {
 	runner.inspector = nil
 	runner.debugLease = nil
 	runner.caches = nil
+	runner.scripts = nil
 	runner.tmpl = nil
 	runner.mu.Unlock()
 
@@ -407,6 +469,7 @@ func (runner *Runner) destroy() {
 		lease.Close()
 	}
 	if ctx != nil {
+		ctx.ResetRetainedValues()
 		ctx.Close()
 	}
 	if inspector != nil {
@@ -449,6 +512,7 @@ func (runner *Runner) reset() bool {
 		lease.Close()
 	}
 	if ctx != nil {
+		ctx.ResetRetainedValues()
 		ctx.Close()
 	}
 

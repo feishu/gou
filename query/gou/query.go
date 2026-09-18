@@ -91,6 +91,7 @@ func (gou *Query) SetAESKey(key string) *Query {
 // Clone 克隆对象
 func (gou *Query) Clone() *Query {
 	var new Query = Query{}
+	new.Query = gou.Query
 	new.GetTableName = gou.GetTableName
 	new.AESKey = gou.AESKey
 	return &new
@@ -374,12 +375,14 @@ func (gou Query) format(row xun.R) share.Record {
 		val := col
 		if has {
 			if field.Field.IsObject {
-				val = share.Record{}
-				col, ok := col.(string)
-				if ok && col != "" {
-					err := jsoniter.Unmarshal([]byte(col), &val)
-					if err != nil {
-						exception.New("%s %s 数据解析错误 %s", 500, key, col, err.Error()).Throw()
+				if field.Field.Key == "" {
+					val = share.Record{}
+					col, ok := col.(string)
+					if ok && col != "" {
+						err := jsoniter.Unmarshal([]byte(col), &val)
+						if err != nil {
+							exception.New("%s %s 数据解析错误 %s", 500, key, col, err.Error()).Throw()
+						}
 					}
 				}
 			} else if field.Field.IsArray {

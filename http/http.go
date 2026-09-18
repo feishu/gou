@@ -13,6 +13,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -170,6 +171,12 @@ func (r *Request) WithContext(ctx context.Context) *Request {
 	return r
 }
 
+// WithTimeout set the request timeout
+func (r *Request) WithTimeout(timeout time.Duration) *Request {
+	r.timeout = timeout
+	return r
+}
+
 // Get send the GET request
 func (r *Request) Get() *Response {
 	if !r.HasHeader("Content-Type") {
@@ -266,7 +273,21 @@ func (r *Request) Send(method string, data interface{}) *Response {
 	isHTTPS := strings.HasPrefix(r.url, "https://")
 	proxy := GetProxy(isHTTPS)
 	tr := GetTransport(isHTTPS, proxy)
-	client := &http.Client{Transport: tr}
+
+	// 默认 30s 全局超时防御，可通过 WithTimeout 或环境变量 YAO_HTTP_TIMEOUT 覆盖
+	timeout := 30 * time.Second
+	if r.timeout > 0 {
+		timeout = r.timeout
+	} else if envTimeout := os.Getenv("YAO_HTTP_TIMEOUT"); envTimeout != "" {
+		if sec, err := strconv.Atoi(envTimeout); err == nil && sec > 0 {
+			timeout = time.Duration(sec) * time.Second
+		}
+	}
+
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   timeout,
+	}
 
 	// Set the request context
 	if r.ctx != nil {

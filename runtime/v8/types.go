@@ -107,6 +107,50 @@ type Script struct {
 	Root        bool
 	SourceRoots interface{} // the script source root mappping
 	Timeout     time.Duration
+	codeCache   *v8go.CompilerCachedData
+	codeCacheMu sync.RWMutex
+	version     uint64
+}
+
+// GetCodeCache 获取已编译的全局字节码缓存
+func (s *Script) GetCodeCache() *v8go.CompilerCachedData {
+	if s == nil {
+		return nil
+	}
+	s.codeCacheMu.RLock()
+	defer s.codeCacheMu.RUnlock()
+	return s.codeCache
+}
+
+// SetCodeCache 设置全局字节码缓存
+func (s *Script) SetCodeCache(cachedData *v8go.CompilerCachedData) {
+	if s == nil {
+		return
+	}
+	s.codeCacheMu.Lock()
+	defer s.codeCacheMu.Unlock()
+	s.codeCache = cachedData
+}
+
+// InvalidateCache 使当前脚本缓存失效并递增版本号
+func (s *Script) InvalidateCache() {
+	if s == nil {
+		return
+	}
+	s.codeCacheMu.Lock()
+	s.codeCache = nil
+	s.version++
+	s.codeCacheMu.Unlock()
+}
+
+// Version 获取当前脚本版本号
+func (s *Script) Version() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.codeCacheMu.RLock()
+	defer s.codeCacheMu.RUnlock()
+	return s.version
 }
 
 type runnerInvocation struct {

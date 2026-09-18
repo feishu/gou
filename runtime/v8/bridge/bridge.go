@@ -3,12 +3,18 @@ package bridge
 import (
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 
 	"github.com/gin-gonic/gin"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/yaoapp/kun/exception"
 	"rogchap.com/v8go"
+)
+
+const (
+	maxSafeInteger = int64(1<<53 - 1) // 9007199254740991 (JavaScript Number.MAX_SAFE_INTEGER)
+	minSafeInteger = -maxSafeInteger  // -9007199254740991 (JavaScript Number.MIN_SAFE_INTEGER)
 )
 
 // UndefinedT type of Undefined
@@ -205,29 +211,45 @@ func JsValue(ctx *v8go.Context, value interface{}) (*v8go.Value, error) {
 		return JsError(ctx, v), nil
 
 	case []byte:
-		newObj, err := ctx.RunScript(fmt.Sprintf("new Uint8Array(%d)", len(v)), "")
-		if err != nil {
-			return nil, err
-		}
-
-		jsObj, err := newObj.AsObject()
-		if err != nil {
-			return nil, err
-		}
-
-		for i := 0; i < len(v); i++ {
-			jsObj.SetIdx(uint32(i), uint32(v[i]))
-		}
-		return jsObj.Value, nil
+		return ctx.NewUint8Array(v)
 
 	case int64:
-		return v8go.NewValue(ctx.Isolate(), int32(v))
+		if v >= math.MinInt32 && v <= math.MaxInt32 {
+			return v8go.NewValue(ctx.Isolate(), int32(v))
+		}
+		if v >= minSafeInteger && v <= maxSafeInteger {
+			return v8go.NewValue(ctx.Isolate(), float64(v))
+		}
+		return v8go.NewValue(ctx.Isolate(), v)
 
 	case uint64:
-		return v8go.NewValue(ctx.Isolate(), int32(v))
+		if v <= math.MaxUint32 {
+			return v8go.NewValue(ctx.Isolate(), uint32(v))
+		}
+		if v <= uint64(maxSafeInteger) {
+			return v8go.NewValue(ctx.Isolate(), float64(v))
+		}
+		return v8go.NewValue(ctx.Isolate(), v)
 
 	case int:
-		return v8go.NewValue(ctx.Isolate(), int32(v))
+		if v >= math.MinInt32 && v <= math.MaxInt32 {
+			return v8go.NewValue(ctx.Isolate(), int32(v))
+		}
+		int64v := int64(v)
+		if int64v >= minSafeInteger && int64v <= maxSafeInteger {
+			return v8go.NewValue(ctx.Isolate(), float64(int64v))
+		}
+		return v8go.NewValue(ctx.Isolate(), int64v)
+
+	case uint:
+		if v <= math.MaxUint32 {
+			return v8go.NewValue(ctx.Isolate(), uint32(v))
+		}
+		uint64v := uint64(v)
+		if uint64v <= uint64(maxSafeInteger) {
+			return v8go.NewValue(ctx.Isolate(), float64(uint64v))
+		}
+		return v8go.NewValue(ctx.Isolate(), uint64v)
 
 	case int8:
 		return v8go.NewValue(ctx.Isolate(), int32(v))
@@ -235,14 +257,11 @@ func JsValue(ctx *v8go.Context, value interface{}) (*v8go.Value, error) {
 	case int16:
 		return v8go.NewValue(ctx.Isolate(), int32(v))
 
-	case uint:
-		return v8go.NewValue(ctx.Isolate(), int32(v))
-
 	case uint8:
-		return v8go.NewValue(ctx.Isolate(), int32(v))
+		return v8go.NewValue(ctx.Isolate(), uint32(v))
 
 	case uint16:
-		return v8go.NewValue(ctx.Isolate(), int32(v))
+		return v8go.NewValue(ctx.Isolate(), uint32(v))
 
 	case float32:
 		return v8go.NewValue(ctx.Isolate(), float64(v))
@@ -357,25 +376,7 @@ func GoValue(value *v8go.Value, ctx *v8go.Context) (interface{}, error) {
 	}
 
 	if value.IsUint8Array() { // bytes
-		arr, err := value.AsObject()
-		if err != nil {
-			return nil, err
-		}
-
-		length, err := arr.Get("length")
-		if err != nil {
-			return nil, err
-		}
-
-		var goValue []byte
-		for i := uint32(0); i < length.Uint32(); i++ {
-			v, err := arr.GetIdx(i)
-			if err != nil {
-				return nil, err
-			}
-			goValue = append(goValue, byte(v.Uint32()))
-		}
-		return goValue, nil
+		return value.Uint8Array()
 	}
 
 	if value.IsArray() {
@@ -463,6 +464,7 @@ func ShareData(ctx *v8go.Context) (*Share, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer jsData.Release()
 
 	goData, err := GoValue(jsData, nil)
 	if err != nil {
@@ -508,6 +510,7 @@ func ShareData1(ctx *v8go.Context) (bool, map[string]interface{}, string, *v8go.
 	if err != nil {
 		return false, nil, "", JsException(ctx, err)
 	}
+	defer jsData.Release()
 
 	goData, err := GoValue(jsData, nil)
 	if err != nil {

@@ -70,6 +70,7 @@ func (script *Script) Open(source []byte) error {
 		}
 	}
 	script.Source = string(source)
+	script.InvalidateCache()
 	return nil
 }
 
@@ -664,6 +665,7 @@ func (script *Script) execPool(process *process.Process) interface{} {
 	}
 
 	return runner.ExecInvocation(runnerInvocation{
+		ctx:    process.Context,
 		script: script,
 		method: process.Method,
 		args:   process.Args,

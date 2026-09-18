@@ -70,7 +70,18 @@ func (gou Query) sqlGroup(group Group, selects map[string]FieldNode) (string, []
 	return fmt.Sprintf("`%s`%s", nameGroup, rollup), joins, update
 }
 
-// sqlExpression 字段表达式转换为 SQL (MySQL8.0)
+// isDM 判断是否为达梦数据库连接
+func (gou Query) isDM() bool {
+	if gou.Query != nil {
+		driver, err := gou.Query.Driver()
+		if err == nil && strings.ToLower(driver) == "dm" {
+			return true
+		}
+	}
+	return false
+}
+
+// sqlExpression 字段表达式转换为 SQL (MySQL8.0 / DM8)
 func (gou Query) sqlExpression(exp Expression, withDefaultAlias ...bool) interface{} {
 
 	table := exp.Table
@@ -80,15 +91,25 @@ func (gou Query) sqlExpression(exp Expression, withDefaultAlias ...bool) interfa
 		defaultAlias = true
 	}
 
+	isDM := gou.isDM()
+
 	if alias != "" {
-		alias = fmt.Sprintf(" AS `%s`", alias)
+		if isDM {
+			alias = fmt.Sprintf(" AS \"%s\"", alias)
+		} else {
+			alias = fmt.Sprintf(" AS `%s`", alias)
+		}
 	}
 
 	if exp.Table != "" {
 		if exp.IsModel {
 			table = gou.GetTableName(exp.Table)
 		}
-		table = fmt.Sprintf("`%s`.", table)
+		if isDM {
+			table = fmt.Sprintf("\"%s\".", table)
+		} else {
+			table = fmt.Sprintf("`%s`.", table)
+		}
 	}
 
 	if exp.IsString {
@@ -133,24 +154,38 @@ func (gou Query) sqlExpression(exp Expression, withDefaultAlias ...bool) interfa
 		return dbal.Raw(fmt.Sprintf("%s(%s)%s", exp.FunName, strings.Join(args, ","), alias))
 	}
 
-	if exp.IsObject { // MySQL Only()
+	if exp.IsObject {
 
 		if defaultAlias && alias == "" {
-			alias = fmt.Sprintf(" AS %s", exp.Field)
+			if isDM {
+				alias = fmt.Sprintf(" AS \"%s\"", exp.Field)
+			} else {
+				alias = fmt.Sprintf(" AS %s", exp.Field)
+			}
 		}
 
 		key := exp.Key
 		if key != "" {
 			key = strings.ReplaceAll(key, "'", `\'`) // 防注入安全过滤
+			if isDM {
+				return dbal.Raw(fmt.Sprintf("JSON_VALUE(%s\"%s\", '$.%s')%s", table, exp.Field, key, alias))
+			}
 			return dbal.Raw(fmt.Sprintf("JSON_EXTRACT(%s`%s`, '$.%s')%s", table, exp.Field, key, alias))
+		}
+		if isDM {
+			return dbal.Raw(fmt.Sprintf("%s\"%s\"%s", table, exp.Field, alias))
 		}
 		return dbal.Raw(fmt.Sprintf("%s%s%s", table, exp.Field, alias))
 	}
 
-	if exp.IsArray { // MySQL Only()
+	if exp.IsArray {
 
 		if defaultAlias && alias == "" {
-			alias = fmt.Sprintf(" AS %s", exp.Field)
+			if isDM {
+				alias = fmt.Sprintf(" AS \"%s\"", exp.Field)
+			} else {
+				alias = fmt.Sprintf(" AS %s", exp.Field)
+			}
 		}
 
 		index := ""
@@ -170,12 +205,21 @@ func (gou Query) sqlExpression(exp Expression, withDefaultAlias ...bool) interfa
 		}
 
 		if index == "" && key == "" {
+			if isDM {
+				return dbal.Raw(fmt.Sprintf("%s\"%s\"%s", table, exp.Field, alias))
+			}
 			return dbal.Raw(fmt.Sprintf("%s%s%s", table, exp.Field, alias))
 		}
 
+		if isDM {
+			return dbal.Raw(fmt.Sprintf("JSON_VALUE(%s\"%s\", '$%s%s')%s", table, exp.Field, index, key, alias))
+		}
 		return dbal.Raw(fmt.Sprintf("JSON_EXTRACT(%s`%s`, '$%s%s')%s", table, exp.Field, index, key, alias))
 	}
 
+	if isDM {
+		return fmt.Sprintf("%s\"%s\"%s", table, exp.Field, alias)
+	}
 	return fmt.Sprintf("%s`%s`%s", table, exp.Field, alias)
 }
 

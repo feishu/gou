@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 const (
@@ -27,6 +28,7 @@ type Request struct {
 	files     []File
 	fileBytes []File
 	data      interface{}
+	timeout   time.Duration
 }
 
 // Response HTTP Response

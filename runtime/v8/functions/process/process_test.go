@@ -135,6 +135,35 @@ func TestProcessWithoutBoundContextKeepsExecBehavior(t *testing.T) {
 	assert.Equal(t, "exec", jsRes.String())
 }
 
+func TestProcessRetainedValuesZeroLeak(t *testing.T) {
+	ctx := prepare(t, false, "", nil)
+	defer close(ctx)
+
+	process.Register("unit.test.ping", func(p *process.Process) interface{} {
+		return "pong"
+	})
+
+	initialCount := ctx.RetainedValueCount()
+
+	// 运行 200 次 Process 调用，每次调用产生 this + 2 个参数，但已由 defer info.Release() 释放
+	// 并且 ShareData 中的 jsData 也已释放，仅留下返回值与脚本本身结果
+	scriptVal, err := ctx.RunScript(`
+		for (let i = 0; i < 200; i++) {
+			Process("unit.test.ping", i, "hello");
+		}
+	`, "leak_test.js")
+	assert.NoError(t, err)
+	scriptVal.Release()
+
+	// 验证入参及 ShareData 句柄已被彻底释放，没有出现 800 个句柄的严重泄漏
+	retainedBeforeReset := ctx.RetainedValueCount()
+	assert.Equal(t, initialCount+200, retainedBeforeReset, "Process 回调入参及全局数据句柄应完全释放")
+
+	// 验证第二层防线：ResetRetainedValues 一键清空长周期上下文中的残留句柄
+	ctx.ResetRetainedValues()
+	assert.Equal(t, 0, ctx.RetainedValueCount(), "ResetRetainedValues 应彻底清空上下文所有持久句柄")
+}
+
 func close(ctx *v8go.Context) {
 	ctx.Isolate().Dispose()
 }

@@ -102,6 +102,31 @@ func (process *Process) Execute() (err error) {
 	}
 }
 
+// ExecuteSync execute the process synchronously in the current goroutine without creating sub-goroutines
+// This method is designed for calls from JavaScript / V8 runtime with shared V8 context
+// to maintain strict thread affinity and avoid orphan goroutines and lock contention.
+func (process *Process) ExecuteSync() (err error) {
+	var hd Handler
+	hd, err = process.handler()
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		recovered := recover()
+		if recovered != nil {
+			err = exception.Catch(recovered)
+			if err != nil {
+				exception.DebugPrint(err, "%s", process)
+			}
+		}
+	}()
+
+	value := hd(process)
+	process._val = &value
+	return nil
+}
+
 // Release the value of the process
 func (process *Process) Release() {
 	process._val = nil

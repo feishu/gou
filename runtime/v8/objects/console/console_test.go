@@ -131,3 +131,36 @@ func TestExportObject(t *testing.T) {
 	}
 	// Since we cannot reliably capture the output, we only verify no errors occur
 }
+
+func TestConsoleRetainedValuesZeroLeak(t *testing.T) {
+	iso := v8go.NewIsolate()
+	defer iso.Dispose()
+
+	obj := New("development")
+	ctx := v8go.NewContext(iso)
+	defer ctx.Close()
+
+	err := obj.Set("console", ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	initialCount := ctx.RetainedValueCount()
+
+	// 运行 200 次 console.log 调用，每次调用有 3 个参数和 this
+	scriptVal, err := ctx.RunScript(`
+		for (let i = 0; i < 200; i++) {
+			console.log("hello", i, { foo: "bar" });
+		}
+	`, "console_leak.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptVal.Release()
+
+	afterCount := ctx.RetainedValueCount()
+	if afterCount != initialCount {
+		t.Fatalf("Expected retained values count to be %d, but got %d (leaked %d handles)",
+			initialCount, afterCount, afterCount-initialCount)
+	}
+}

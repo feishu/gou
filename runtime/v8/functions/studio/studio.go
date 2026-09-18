@@ -16,6 +16,7 @@ func ExportFunction(iso *v8go.Isolate) *v8go.FunctionTemplate {
 
 // exec
 func exec(info *v8go.FunctionCallbackInfo) *v8go.Value {
+	defer info.Release()
 
 	share, err := bridge.ShareData(info.Context())
 	if err != nil {

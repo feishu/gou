@@ -116,6 +116,7 @@ func (obj *Object) info(iso *v8go.Isolate) *v8go.FunctionTemplate {
  * @return *v8go.Value
  */
 func (obj *Object) dump(info *v8go.FunctionCallbackInfo, method func(...interface{})) *v8go.Value {
+	defer info.Release()
 	args := info.Args()
 	if len(args) < 1 {
 		msg := fmt.Sprintf("console: Missing parameters")
