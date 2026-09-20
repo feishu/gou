@@ -580,8 +580,8 @@ func (dispatcher *Dispatcher) logSelectedRunner(runner *Runner) {
 	available := len(dispatcher.availables)
 	dispatcher.mu.Unlock()
 
-	log.Debug(fmt.Sprintf("--- [%s] -----------------", runner.id))
-	log.Debug(fmt.Sprintf("1.  [%s] Select a free v8 runner. availables=%d", runner.id, available))
+	log.Debug("--- [%s] -----------------", runner.id)
+	log.Debug("1.  [%s] Select a free v8 runner. availables=%d", runner.id, available)
 }
 
 func (dispatcher *Dispatcher) drainIdleRunners() []*Runner {
