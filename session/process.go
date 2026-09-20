@@ -113,19 +113,10 @@ func processGetMany(process *process.Process) interface{} {
 	ss := setSession(process)
 	process.ValidateArgNums(1)
 	keys := process.ArgsStrings(0)
-	res := map[string]interface{}{}
 	if process.NumOfArgs() == 2 {
 		ss = Global().ID(process.ArgsString(1))
-		for _, key := range keys {
-			res[key] = ss.MustGet(key)
-		}
-		return res
 	}
-
-	for _, key := range keys {
-		res[key] = ss.MustGet(key)
-	}
-	return res
+	return ss.MustGetMany(keys)
 }
 
 // processDelMany
@@ -135,14 +126,8 @@ func processDelMany(process *process.Process) interface{} {
 	keys := process.ArgsStrings(0)
 	if process.NumOfArgs() == 2 {
 		ss = Global().ID(process.ArgsString(1))
-		for _, key := range keys {
-			ss.MustDel(key)
-		}
-		return nil
 	}
-	for _, key := range keys {
-		ss.MustDel(key)
-	}
+	ss.MustDelMany(keys)
 	return nil
 }
 

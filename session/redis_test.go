@@ -8,12 +8,17 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func init() {
+var redisAvailable = false
 
+func init() {
 	host := os.Getenv("GOU_TEST_REDIS_HOST")
 	port := os.Getenv("GOU_TEST_REDIS_PORT")
 	db := os.Getenv("GOU_TEST_REDIS_DB")
 	pass := os.Getenv("GOU_TEST_REDIS_PASSWORD")
+
+	if host == "" {
+		host = "127.0.0.1"
+	}
 
 	args := []string{}
 	if port != "" {
@@ -29,24 +34,33 @@ func init() {
 	}
 
 	rdb, err := NewRedis(host, args...)
-	if err != nil {
-		panic(err)
+	if err == nil {
+		Register("redis", rdb)
+		redisAvailable = true
 	}
-	Register("redis", rdb)
+}
+
+func checkRedis(t *testing.T) {
+	if !redisAvailable {
+		t.Skip("Redis is not available, skipping redis tests")
+	}
 }
 
 func TestRedisMake(t *testing.T) {
+	checkRedis(t)
 	s := Use("redis").Make().Expire(3600 * time.Second).AsGlobal()
 	assert.NotNil(t, s.GetID())
 }
 
 func TestRedisID(t *testing.T) {
+	checkRedis(t)
 	id := ID()
 	s := Use("redis").ID(id)
 	assert.Equal(t, id, s.GetID())
 }
 
 func TestRedisMustSetGetDel(t *testing.T) {
+	checkRedis(t)
 	id := ID()
 	s := Use("redis").ID(id).Expire(200 * time.Millisecond)
 	s.MustSet("foo", "bar")
@@ -67,6 +81,7 @@ func TestRedisMustSetGetDel(t *testing.T) {
 }
 
 func TestRedisMustSetWithEx(t *testing.T) {
+	checkRedis(t)
 	id := ID()
 	ss := Use("redis").ID(id)
 	ss.MustSetWithEx("foo", "bar", 200*time.Millisecond)
@@ -83,6 +98,7 @@ func TestRedisMustSetWithEx(t *testing.T) {
 }
 
 func TestRedisMustDump(t *testing.T) {
+	checkRedis(t)
 	id := ID()
 	ss := Use("redis").ID(id).Expire(200 * time.Millisecond)
 	ss.MustSet("foo", "bar")
@@ -96,3 +112,33 @@ func TestRedisMustDump(t *testing.T) {
 	data = ss.MustDump()
 	assert.Equal(t, map[string]interface{}{}, data)
 }
+
+func TestRedisBatchOperations(t *testing.T) {
+	checkRedis(t)
+	id := ID()
+	ss := Use("redis").ID(id).Expire(10 * time.Second)
+
+	// 批量设置
+	err := ss.SetMany(map[string]interface{}{
+		"k1": "v1",
+		"k2": "v2",
+		"k3": 123,
+	})
+	assert.NoError(t, err)
+
+	// 批量读取
+	vals, err := ss.GetMany([]string{"k1", "k2", "k3", "k4"})
+	assert.NoError(t, err)
+	assert.Equal(t, "v1", vals["k1"])
+	assert.Equal(t, "v2", vals["k2"])
+	assert.Equal(t, float64(123), vals["k3"]) // json反序列化数字为 float64
+	assert.Nil(t, vals["k4"])
+
+	// 批量删除
+	err = ss.DelMany([]string{"k1", "k2"})
+	assert.NoError(t, err)
+	assert.Nil(t, ss.MustGet("k1"))
+	assert.Nil(t, ss.MustGet("k2"))
+	assert.Equal(t, float64(123), ss.MustGet("k3"))
+}
+

@@ -112,6 +112,9 @@ func (session *Session) MustSetWithEx(key string, value interface{}, timeout tim
 
 // SetMany 设置多个数值
 func (session *Session) SetMany(values map[string]interface{}) error {
+	if bm, ok := session.Manager.(BatchManager); ok {
+		return bm.SetMany(session.id, values, session.timeout)
+	}
 	for key, value := range values {
 		if err := session.Manager.Set(session.id, key, value, session.timeout); err != nil {
 			return err
@@ -130,6 +133,9 @@ func (session *Session) MustSetMany(values map[string]interface{}) {
 
 // SetManyWithEx 设置多个数值
 func (session *Session) SetManyWithEx(values map[string]interface{}, timeout time.Duration) error {
+	if bm, ok := session.Manager.(BatchManager); ok {
+		return bm.SetMany(session.id, values, timeout)
+	}
 	for key, value := range values {
 		if err := session.Manager.Set(session.id, key, value, timeout); err != nil {
 			return err
@@ -160,6 +166,31 @@ func (session *Session) MustGet(key string) interface{} {
 	return value
 }
 
+// GetMany 批量读取多个数值
+func (session *Session) GetMany(keys []string) (map[string]interface{}, error) {
+	if bm, ok := session.Manager.(BatchManager); ok {
+		return bm.GetMany(session.id, keys)
+	}
+	res := make(map[string]interface{}, len(keys))
+	for _, key := range keys {
+		val, err := session.Manager.Get(session.id, key)
+		if err != nil {
+			return nil, err
+		}
+		res[key] = val
+	}
+	return res, nil
+}
+
+// MustGetMany 批量读取多个数值
+func (session *Session) MustGetMany(keys []string) map[string]interface{} {
+	values, err := session.GetMany(keys)
+	if err != nil {
+		exception.Err(err, 500).Throw()
+	}
+	return values
+}
+
 // Del 删除数值
 func (session *Session) Del(key string) error {
 	return session.Manager.Del(session.id, key)
@@ -168,6 +199,27 @@ func (session *Session) Del(key string) error {
 // MustDel 删除数值
 func (session *Session) MustDel(key string) {
 	err := session.Del(key)
+	if err != nil {
+		exception.Err(err, 500).Throw()
+	}
+}
+
+// DelMany 批量删除数值
+func (session *Session) DelMany(keys []string) error {
+	if bm, ok := session.Manager.(BatchManager); ok {
+		return bm.DelMany(session.id, keys)
+	}
+	for _, key := range keys {
+		if err := session.Manager.Del(session.id, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MustDelMany 批量删除数值
+func (session *Session) MustDelMany(keys []string) {
+	err := session.DelMany(keys)
 	if err != nil {
 		exception.Err(err, 500).Throw()
 	}

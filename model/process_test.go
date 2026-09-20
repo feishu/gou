@@ -3,6 +3,7 @@ package model
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -669,4 +670,19 @@ func TestProcessUpsert(t *testing.T) {
 	}, "mobile", 123)
 	_, err = p.Exec()
 	assert.NotNil(t, err)
+}
+
+func TestProcessListConcurrent(t *testing.T) {
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p := process.New("model.list", map[string]interface{}{"metadata": true, "columns": true})
+			res, err := p.Exec()
+			assert.Nil(t, err)
+			assert.NotNil(t, res)
+		}()
+	}
+	wg.Wait()
 }

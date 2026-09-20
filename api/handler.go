@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -108,9 +109,14 @@ func (path Path) writeResponse(c *gin.Context, resp interface{}, status int, con
 }
 
 func (path Path) processHandler() func(c *gin.Context) {
-	process := process.New(path.Process)
-	res := process.Run()
-	handler, ok := res.(func(c *gin.Context))
+	p := process.New(path.Process)
+	if err := p.Execute(); err != nil {
+		return func(c *gin.Context) {
+			c.Done()
+		}
+	}
+	defer p.Release()
+	handler, ok := p.Value().(func(c *gin.Context))
 	if !ok {
 		handler = func(c *gin.Context) {
 			c.Done()
@@ -376,6 +382,10 @@ func (path Path) setResponseHeaders(c *gin.Context, resp interface{}, contentTyp
 }
 
 func (path Path) setPayload(c *gin.Context) {
+	// 如果已被 Guard 或前置中间件解析缓存，直接复用
+	if _, exists := c.Get("__payloads"); exists {
+		return
+	}
 
 	if strings.HasPrefix(strings.ToLower(c.GetHeader("content-type")), "application/json") {
 
@@ -384,22 +394,32 @@ func (path Path) setPayload(c *gin.Context) {
 			return
 		}
 
-		bytes, err := io.ReadAll(c.Request.Body)
-		if err != nil {
+		var rawBytes []byte
+		if v, has := c.Get("__raw_body_bytes"); has {
+			if b, ok := v.([]byte); ok {
+				rawBytes = b
+			}
+		}
+
+		if rawBytes == nil {
+			var err error
+			rawBytes, err = io.ReadAll(c.Request.Body)
+			if err != nil {
+				c.Set("__payloads", map[string]interface{}{})
+				log.Error("[Path] %s %s", path.Path, err.Error())
+				return
+			}
+			c.Set("__raw_body_bytes", rawBytes)
+		}
+
+		if len(rawBytes) == 0 {
 			c.Set("__payloads", map[string]interface{}{})
-			log.Error("[Path] %s %s", path.Path, err.Error())
 			return
 		}
 
-		if bytes == nil || len(bytes) == 0 {
-			c.Set("__payloads", map[string]interface{}{})
-			return
-
-		}
-
-		if isFirstNonSpaceChar(string(bytes), '{') {
+		if isFirstNonSpaceChar(string(rawBytes), '{') {
 			payloads := map[string]interface{}{}
-			err = jsoniter.Unmarshal(bytes, &payloads)
+			err := jsoniter.Unmarshal(rawBytes, &payloads)
 			if err != nil {
 				c.Set("__payloads", map[string]interface{}{})
 				log.Error("[Path] %s %s", path.Path, err.Error())
@@ -407,7 +427,7 @@ func (path Path) setPayload(c *gin.Context) {
 			c.Set("__payloads", payloads)
 		}
 
-		c.Request.Body = io.NopCloser(strings.NewReader(string(bytes)))
+		c.Request.Body = io.NopCloser(bytes.NewReader(rawBytes))
 	}
 }
 

@@ -218,7 +218,19 @@ func (stack *QueryStack) paginate(page int, pagesize int, res *[][]maps.MapStrAn
 			fmtRow[key] = value
 		}
 
-		fmtRows = append(fmtRows, fmtRow.UnDot())
+		// 仅在键名包含点符号时才执行深层递归 UnDot()，常规列跳过深度拆解以提升吞吐
+		hasDot := false
+		for k := range fmtRow {
+			if strings.ContainsRune(k, '.') {
+				hasDot = true
+				break
+			}
+		}
+		if hasDot {
+			fmtRows = append(fmtRows, fmtRow.UnDot())
+		} else {
+			fmtRows = append(fmtRows, fmtRow)
+		}
 	}
 	*res = append(*res, fmtRows)
 	stack.Next()
@@ -272,7 +284,20 @@ func (stack *QueryStack) run(res *[][]maps.MapStrAny, builder QueryStackBuilder,
 			}
 			fmtRow[key] = value
 		}
-		fmtRows = append(fmtRows, fmtRow.UnDot())
+
+		// 仅在键名包含点符号时才执行深层递归 UnDot()
+		hasDot := false
+		for k := range fmtRow {
+			if strings.ContainsRune(k, '.') {
+				hasDot = true
+				break
+			}
+		}
+		if hasDot {
+			fmtRows = append(fmtRows, fmtRow.UnDot())
+		} else {
+			fmtRows = append(fmtRows, fmtRow)
+		}
 	}
 	*res = append(*res, fmtRows)
 	stack.Next()

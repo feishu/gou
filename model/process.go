@@ -103,9 +103,7 @@ func processModelLoad(process *process.Process) interface{} {
 func processModelUnload(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	id := process.ArgsString(0)
-	rwlock.Lock()
-	defer rwlock.Unlock()
-	delete(Models, id)
+	UnsetModel(id)
 	return nil
 }
 
@@ -153,7 +151,8 @@ func processList(process *process.Process) interface{} {
 		withColumns = v
 	}
 
-	for _, model := range Models {
+	modelList := ListModels()
+	for _, model := range modelList {
 		file := model.File
 		if !strings.HasPrefix(file, "/") {
 			file = fmt.Sprintf("/models/%s", file)
@@ -193,6 +192,9 @@ func processFind(process *process.Process) interface{} {
 	if !ok {
 		params = QueryParam{}
 	}
+	if process.Context != nil {
+		params.Context = process.Context
+	}
 	return mod.MustFind(process.Args[0], params)
 }
 
@@ -204,6 +206,9 @@ func processGet(process *process.Process) interface{} {
 	if !ok {
 		exception.New("第1个查询参数错误 %v", 400, process.Args[0]).Throw()
 	}
+	if process.Context != nil {
+		params.Context = process.Context
+	}
 	return mod.MustGet(params)
 }
 
@@ -214,6 +219,9 @@ func processPaginate(process *process.Process) interface{} {
 	params, ok := AnyToQueryParam(process.Args[0])
 	if !ok {
 		exception.New("第1个查询参数错误 %v", 400, process.Args[0]).Throw()
+	}
+	if process.Context != nil {
+		params.Context = process.Context
 	}
 
 	page := any.Of(process.Args[1]).CInt()
@@ -228,6 +236,9 @@ func processCount(process *process.Process) interface{} {
 	params, ok := AnyToQueryParam(process.Args[0])
 	if !ok {
 		exception.New("第1个查询参数错误 %v", 400, process.Args[0]).Throw()
+	}
+	if process.Context != nil {
+		params.Context = process.Context
 	}
 	return mod.MustCount(params)
 }

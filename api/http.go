@@ -39,18 +39,35 @@ func ProcessGuard(name string, cors ...gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var body interface{}
 		if c.Request.Body != nil {
-
-			bodyBytes, err := io.ReadAll(c.Request.Body)
-			if err == nil {
-				if strings.HasPrefix(strings.ToLower(c.Request.Header.Get("Content-Type")), "application/json") {
-					jsoniter.Unmarshal(bodyBytes, &body)
-				} else {
-					body = string(bodyBytes)
+			var bodyBytes []byte
+			if v, has := c.Get("__raw_body_bytes"); has {
+				if b, ok := v.([]byte); ok {
+					bodyBytes = b
+				}
+			}
+			if bodyBytes == nil {
+				var err error
+				bodyBytes, err = io.ReadAll(c.Request.Body)
+				if err == nil {
+					c.Set("__raw_body_bytes", bodyBytes)
 				}
 			}
 
-			// Reset body
-			c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			if bodyBytes != nil {
+				if strings.HasPrefix(strings.ToLower(c.Request.Header.Get("Content-Type")), "application/json") {
+					var parsed map[string]interface{}
+					if err := jsoniter.Unmarshal(bodyBytes, &parsed); err == nil {
+						body = parsed
+						c.Set("__payloads", parsed)
+					} else {
+						body = string(bodyBytes)
+					}
+				} else {
+					body = string(bodyBytes)
+				}
+				// Reset body
+				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			}
 		}
 
 		params := map[string]string{}
@@ -292,11 +309,21 @@ func (http HTTP) parseIn(in []interface{}) func(c *gin.Context) []interface{} {
 
 		if v == ":body" {
 			getValues = append(getValues, func(c *gin.Context) interface{} {
-				bytes, err := io.ReadAll(c.Request.Body)
+				if v, has := c.Get("__raw_body_bytes"); has {
+					if b, ok := v.([]byte); ok {
+						return string(b)
+					}
+				}
+				if c.Request.Body == nil {
+					return ""
+				}
+				rawBytes, err := io.ReadAll(c.Request.Body)
 				if err != nil {
 					panic(err)
 				}
-				return string(bytes)
+				c.Set("__raw_body_bytes", rawBytes)
+				c.Request.Body = io.NopCloser(bytes.NewReader(rawBytes))
+				return string(rawBytes)
 			})
 			continue
 		} else if v == ":fullpath" {
@@ -376,7 +403,23 @@ func (http HTTP) parseIn(in []interface{}) func(c *gin.Context) []interface{} {
 			getValues = append(getValues, func(c *gin.Context) interface{} {
 				if sid := c.GetString("__sid"); sid != "" {
 					name := arg[1]
-					return session.Global().ID(sid).MustGet(name)
+					// 请求级会话快照缓存，避免同一 HTTP 请求内重复触发 Redis 远程 IO
+					var cache map[string]interface{}
+					if rawCache, exists := c.Get("__session_cache"); exists {
+						if m, ok := rawCache.(map[string]interface{}); ok {
+							cache = m
+						}
+					}
+					if cache == nil {
+						cache = make(map[string]interface{})
+						c.Set("__session_cache", cache)
+					}
+					if val, ok := cache[name]; ok {
+						return val
+					}
+					val := session.Global().ID(sid).MustGet(name)
+					cache[name] = val
+					return val
 				}
 				return ""
 			})

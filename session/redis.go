@@ -66,17 +66,29 @@ func NewRedis(host string, options ...string) (*Redis, error) {
 // Init initialization
 func (redis *Redis) Init() {}
 
-// Set session value
+// Set session value (基于 Redis Hash 聚合存储，1 RTT)
 func (redis *Redis) Set(id string, key string, value interface{}, timeout time.Duration) error {
-	skey := fmt.Sprintf("%s:%s:%s", "yao:session", id, key)
+	hkey := fmt.Sprintf("yao:session:%s", id)
 	bytes, err := jsoniter.Marshal(value)
 	if err != nil {
-		log.Error("Session redis Set: %s key %s", err.Error(), skey)
+		log.Error("Session redis Set: %s key %s", err.Error(), key)
 		return err
 	}
 
-	log.Debug("Session redis Set: %s KEY: %s VALUE: %v TS: %#v", skey, key, value, timeout)
-	err = redis.rdb.Set(context.Background(), skey, bytes, timeout).Err()
+	log.Debug("Session redis Set: %s KEY: %s VALUE: %v TS: %#v", hkey, key, value, timeout)
+
+	ctx := context.Background()
+	pipe := redis.rdb.Pipeline()
+	pipe.HSet(ctx, hkey, key, bytes)
+	if timeout > 0 {
+		pipe.Expire(ctx, hkey, timeout)
+	}
+
+	// 顺带清理旧格式离散 String key，防止残留陈旧脏数据
+	skey := fmt.Sprintf("yao:session:%s:%s", id, key)
+	pipe.Del(ctx, skey)
+
+	_, err = pipe.Exec(ctx)
 	if err != nil {
 		log.Error("Session redis Set: %s", err.Error())
 		return err
@@ -84,35 +96,72 @@ func (redis *Redis) Set(id string, key string, value interface{}, timeout time.D
 	return nil
 }
 
-// Get session value
+// Get session value (支持 Hash 优先 + 旧离散 String 双读回退与惰性迁移)
 func (redis *Redis) Get(id string, key string) (interface{}, error) {
+	hkey := fmt.Sprintf("yao:session:%s", id)
+	ctx := context.Background()
 
-	skey := fmt.Sprintf("%s:%s:%s", "yao:session", id, key)
-	val, err := redis.rdb.Get(context.Background(), skey).Result()
-	if err != nil {
-		if "redis: nil" == err.Error() {
-			return nil, nil
+	// 1. 优先尝试从 Hash 读取
+	val, err := redis.rdb.HGet(ctx, hkey, key).Result()
+	if err == nil {
+		var value interface{}
+		err = jsoniter.Unmarshal([]byte(val), &value)
+		if err != nil {
+			log.Error("Session redis Get JSON: %s val: %s ERROR:%s", key, val, err.Error())
+			return nil, err
 		}
+		return value, nil
+	}
 
-		log.Error("Session redis Get: %s ERROR:%s", skey, err.Error())
+	// 若并非不存在（例如网络或连接错误），直接返回错误
+	if err != nil && err.Error() != "redis: nil" && !strings.Contains(err.Error(), "redis: nil") {
+		log.Error("Session redis HGet: %s field: %s ERROR:%s", hkey, key, err.Error())
 		return nil, err
 	}
 
+	// 2. Hash 未命中，双读回退：读取旧离散 String 格式 (yao:session:{id}:{key})
+	skey := fmt.Sprintf("yao:session:%s:%s", id, key)
+	oldVal, oldErr := redis.rdb.Get(ctx, skey).Result()
+	if oldErr != nil {
+		if oldErr.Error() == "redis: nil" || strings.Contains(oldErr.Error(), "redis: nil") {
+			return nil, nil // 两者都未命中
+		}
+		log.Error("Session redis fallback Get: %s ERROR:%s", skey, oldErr.Error())
+		return nil, oldErr
+	}
+
+	// 3. 旧格式命中，反序列化并执行惰性迁移至 Hash
 	var value interface{}
-	err = jsoniter.Unmarshal([]byte(val), &value)
+	err = jsoniter.Unmarshal([]byte(oldVal), &value)
 	if err != nil {
-		log.Error("Session redis Get JSON: %s val: %s ERROR:%s", skey, val, err.Error())
+		log.Error("Session redis fallback Get JSON: %s val: %s ERROR:%s", skey, oldVal, err.Error())
 		return nil, err
 	}
+
+	// 惰性迁移：写入 Hash 并保留原有 TTL，删除旧 String
+	ttl, _ := redis.rdb.TTL(ctx, skey).Result()
+	pipe := redis.rdb.Pipeline()
+	pipe.HSet(ctx, hkey, key, oldVal)
+	if ttl > 0 {
+		pipe.Expire(ctx, hkey, ttl)
+	}
+	pipe.Del(ctx, skey)
+	_, _ = pipe.Exec(ctx)
 
 	return value, nil
 }
 
 // Del session value
 func (redis *Redis) Del(id string, key string) error {
-	skey := fmt.Sprintf("%s:%s:%s", "yao:session", id, key)
-	log.Debug("Session redis Del: %s", skey)
-	err := redis.rdb.Del(context.Background(), skey).Err()
+	hkey := fmt.Sprintf("yao:session:%s", id)
+	skey := fmt.Sprintf("yao:session:%s:%s", id, key)
+	ctx := context.Background()
+
+	log.Debug("Session redis Del: %s field %s", hkey, key)
+	pipe := redis.rdb.Pipeline()
+	pipe.HDel(ctx, hkey, key)
+	pipe.Del(ctx, skey)
+	_, err := pipe.Exec(ctx)
 	if err != nil {
 		log.Error("Session redis Del: %s", err.Error())
 		return err
@@ -120,24 +169,166 @@ func (redis *Redis) Del(id string, key string) error {
 	return nil
 }
 
-// Dump session data
+// Dump session data (使用 HGetAll 替代高危 KEYS 命令，1 RTT 完成全量拉取)
 func (redis *Redis) Dump(id string) (map[string]interface{}, error) {
-	prefix := fmt.Sprintf("%s:%s:", "yao:session", id)
+	hkey := fmt.Sprintf("yao:session:%s", id)
+	ctx := context.Background()
+
 	res := map[string]interface{}{}
-	keys, err := redis.rdb.Keys(context.Background(), prefix+"*").Result()
+	fields, err := redis.rdb.HGetAll(ctx, hkey).Result()
 	if err != nil {
-		log.Error("Session redis Dump %s ERROR:%s", id, err.Error())
+		log.Error("Session redis Dump HGetAll %s ERROR:%s", id, err.Error())
 		return res, err
 	}
 
-	for _, key := range keys {
-		key = strings.TrimPrefix(key, prefix)
-		val, err := redis.Get(id, key)
-		if err != nil {
-			res[key] = nil
+	for k, val := range fields {
+		var value interface{}
+		if err := jsoniter.Unmarshal([]byte(val), &value); err != nil {
+			log.Error("Session redis Dump JSON: %s val: %s ERROR:%s", k, val, err.Error())
+			res[k] = nil
 			continue
 		}
-		res[key] = val
+		res[k] = value
 	}
+
+	// 如果 Hash 中有数据，直接返回
+	if len(res) > 0 {
+		return res, nil
+	}
+
+	// 存量旧数据回退兼容：使用非阻塞 SCAN 替代 KEYS * 规避生产停顿
+	prefix := fmt.Sprintf("yao:session:%s:", id)
+	var cursor uint64
+	for {
+		keys, nextCursor, err := redis.rdb.Scan(ctx, cursor, prefix+"*", 100).Result()
+		if err != nil {
+			log.Error("Session redis Dump Scan %s ERROR:%s", id, err.Error())
+			break
+		}
+		for _, key := range keys {
+			pureKey := strings.TrimPrefix(key, prefix)
+			val, err := redis.Get(id, pureKey)
+			if err != nil {
+				res[pureKey] = nil
+				continue
+			}
+			res[pureKey] = val
+		}
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+
 	return res, nil
 }
+
+// SetMany 批量设置 session 键值对 (支持 BatchManager 接口，1 RTT Pipeline)
+func (redis *Redis) SetMany(id string, values map[string]interface{}, timeout time.Duration) error {
+	if len(values) == 0 {
+		return nil
+	}
+	hkey := fmt.Sprintf("yao:session:%s", id)
+	ctx := context.Background()
+
+	fields := make(map[string]interface{}, len(values))
+	oldKeys := make([]string, 0, len(values))
+	for k, v := range values {
+		bytes, err := jsoniter.Marshal(v)
+		if err != nil {
+			log.Error("Session redis SetMany: %s key %s", err.Error(), k)
+			return err
+		}
+		fields[k] = bytes
+		oldKeys = append(oldKeys, fmt.Sprintf("yao:session:%s:%s", id, k))
+	}
+
+	pipe := redis.rdb.Pipeline()
+	pipe.HSet(ctx, hkey, fields)
+	if timeout > 0 {
+		pipe.Expire(ctx, hkey, timeout)
+	}
+	if len(oldKeys) > 0 {
+		pipe.Del(ctx, oldKeys...)
+	}
+
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		log.Error("Session redis SetMany: %s", err.Error())
+		return err
+	}
+	return nil
+}
+
+// GetMany 批量读取 session 键值对 (支持 BatchManager 接口，1 RTT HMGet)
+func (redis *Redis) GetMany(id string, keys []string) (map[string]interface{}, error) {
+	if len(keys) == 0 {
+		return map[string]interface{}{}, nil
+	}
+	hkey := fmt.Sprintf("yao:session:%s", id)
+	ctx := context.Background()
+
+	vals, err := redis.rdb.HMGet(ctx, hkey, keys...).Result()
+	res := make(map[string]interface{}, len(keys))
+	var missingKeys []string
+
+	if err == nil {
+		for i, v := range vals {
+			key := keys[i]
+			if v == nil {
+				missingKeys = append(missingKeys, key)
+				continue
+			}
+			strVal, ok := v.(string)
+			if !ok {
+				missingKeys = append(missingKeys, key)
+				continue
+			}
+			var value interface{}
+			if err := jsoniter.Unmarshal([]byte(strVal), &value); err != nil {
+				res[key] = nil
+				continue
+			}
+			res[key] = value
+		}
+	} else {
+		missingKeys = keys
+	}
+
+	// 对 Hash 中未命中的 key 回退查询旧 String
+	for _, mKey := range missingKeys {
+		val, err := redis.Get(id, mKey)
+		if err == nil && val != nil {
+			res[mKey] = val
+		} else {
+			res[mKey] = nil
+		}
+	}
+
+	return res, nil
+}
+
+// DelMany 批量删除 session 键值对 (支持 BatchManager 接口，1 RTT Pipeline)
+func (redis *Redis) DelMany(id string, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	hkey := fmt.Sprintf("yao:session:%s", id)
+	ctx := context.Background()
+
+	oldKeys := make([]string, len(keys))
+	for i, k := range keys {
+		oldKeys[i] = fmt.Sprintf("yao:session:%s:%s", id, k)
+	}
+
+	pipe := redis.rdb.Pipeline()
+	pipe.HDel(ctx, hkey, keys...)
+	pipe.Del(ctx, oldKeys...)
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		log.Error("Session redis DelMany: %s", err.Error())
+		return err
+	}
+	return nil
+}
+

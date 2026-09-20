@@ -1,6 +1,8 @@
 package model
 
 import (
+	"context"
+
 	"github.com/yaoapp/gou/types"
 	"github.com/yaoapp/kun/maps"
 )
@@ -156,6 +158,7 @@ type QueryParam struct {
 	Page     int             `json:"page,omitempty"`
 	PageSize int             `json:"pagesize,omitempty"`
 	Withs    map[string]With `json:"withs,omitempty"`
+	Context  context.Context `json:"-"`
 }
 
 // With relations 关联查询

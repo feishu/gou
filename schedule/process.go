@@ -147,3 +147,13 @@ func processScheduleStop(process *process.Process) interface{} {
 	sch.Stop()
 	return map[string]interface{}{"enabled": sch.Enabled}
 }
+
+// StopAll 停止所有正在运行的 Cron 定时任务并重置状态
+func StopAll() {
+	for _, sch := range Schedules {
+		if sch != nil && sch.cron != nil {
+			sch.Stop()
+		}
+	}
+}
+

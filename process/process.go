@@ -42,77 +42,15 @@ func Of(name string, args ...interface{}) (*Process, error) {
 	return process, nil
 }
 
-// Execute execute the process and return error only
+// Execute execute the process in the current goroutine synchronously with cooperative cancellation.
+// Eliminates short-lived goroutines, channel allocations, and select context switches.
 func (process *Process) Execute() (err error) {
-	var hd Handler
-	hd, err = process.handler()
-	if err != nil {
-		return err
-	}
-
-	// Fast-Path: when no external context is provided, execute directly in current goroutine
-	// Eliminates short-lived goroutines, channel allocations, and select context switches
-	if process.Context == nil {
-		defer func() {
-			recovered := recover()
-			if recovered != nil {
-				err = exception.Catch(recovered)
-				if err != nil {
-					exception.DebugPrint(err, "%s", process)
-				}
-			}
-		}()
-		value := hd(process)
-		process._val = &value
-		return nil
-	}
-
-	// Slow-Path: monitor with external context via isolated buffered channel
-	if err := process.Context.Err(); err != nil {
-		return err
-	}
-
-	type execResult struct {
-		value interface{}
-		err   error
-	}
-
-	resChan := make(chan execResult, 1)
-	go func() {
-		var subErr error
-		var subVal interface{}
-		defer func() {
-			recovered := recover()
-			if recovered != nil {
-				subErr = exception.Catch(recovered)
-				if subErr != nil {
-					exception.DebugPrint(subErr, "%s", process)
-				}
-			}
-			resChan <- execResult{value: subVal, err: subErr}
-		}()
-		subVal = hd(process)
-	}()
-
-	select {
-	case <-process.Context.Done():
-		if process.Runtime != nil {
-			process.Runtime.Dispose()
+	if process.Context != nil {
+		if err := process.Context.Err(); err != nil {
+			return err
 		}
-		return process.Context.Err()
-	case res := <-resChan:
-		if res.err != nil {
-			return res.err
-		}
-		process._val = &res.value
-		return nil
 	}
-}
 
-// ExecuteSync execute the process synchronously in the current goroutine without creating sub-goroutines
-// This method is designed for calls from JavaScript / V8 runtime with shared V8 context
-// to maintain strict thread affinity and avoid orphan goroutines and lock contention.
-func (process *Process) ExecuteSync() (err error) {
 	var hd Handler
 	hd, err = process.handler()
 	if err != nil {
@@ -131,7 +69,23 @@ func (process *Process) ExecuteSync() (err error) {
 
 	value := hd(process)
 	process._val = &value
+
+	// Check if context was cancelled during execution
+	if process.Context != nil {
+		if ctxErr := process.Context.Err(); ctxErr != nil {
+			if process.Runtime != nil {
+				process.Runtime.Dispose()
+			}
+			return ctxErr
+		}
+	}
 	return nil
+}
+
+// ExecuteSync execute the process synchronously in the current goroutine without creating sub-goroutines
+// Retained for backward compatibility.
+func (process *Process) ExecuteSync() (err error) {
+	return process.Execute()
 }
 
 // Release the value of the process
@@ -160,50 +114,24 @@ func (process *Process) Value() interface{} {
 }
 
 // Run the process
-// ****
-//
-// This function causes a memory leak, will be disposed in the future,
-// Use Execute() instead
-//
-// ****
 func (process *Process) Run() interface{} {
-	hd, err := process.handler()
+	err := process.Execute()
 	if err != nil {
 		exception.New("%s", 500, err.Error()).Throw()
 		return nil
 	}
-
-	defer func() { process.Release() }()
-	return hd(process)
+	defer process.Release()
+	return process.Value()
 }
 
-// Exec execute the process and return error
-//
-// ****
-//
-// This function causes a memory leak, will be disposed in the future,
-// Use Execute() instead
-// Example:
-//
-//	process := Of("models.user.pet.Find", 1, {})
-//	err := process.Execute();
-//	if err != nil {
-//	 	// handle error
-//	}
-//	defer process.Release()  // or  process.Dispose() if you want to relese the runtime isolate after run success
-//	result := process.Value() // Get the result
-//
-// ****
+// Exec execute the process and return value and error
 func (process *Process) Exec() (value interface{}, err error) {
-	var hd Handler
-	hd, err = process.handler()
+	err = process.Execute()
 	if err != nil {
-		return
+		return nil, err
 	}
-
-	defer func() { err = exception.Catch(recover()) }()
-	value = hd(process)
-	return
+	defer process.Release()
+	return process.Value(), nil
 }
 
 // Register register a process handler

@@ -11,6 +11,14 @@ type Manager interface {
 	Dump(id string) (map[string]interface{}, error)
 }
 
+// BatchManager 支持批量与聚合操作的高性能会话管理器
+type BatchManager interface {
+	Manager
+	GetMany(id string, keys []string) (map[string]interface{}, error)
+	SetMany(id string, values map[string]interface{}, expired time.Duration) error
+	DelMany(id string, keys []string) error
+}
+
 // Session 数据结构
 type Session struct {
 	id      string
@@ -18,3 +26,4 @@ type Session struct {
 	timeout time.Duration
 	Manager Manager
 }
+

@@ -44,9 +44,14 @@ func (param QueryParam) Query(stack *QueryStack, stackParams ...QueryStackParam)
 			stackParam = stackParams[0]
 		}
 
+		qb := capsule.Query().Table(param.Table + " as " + param.Alias)
+		if param.Context != nil {
+			qb = qb.WithContext(param.Context)
+		}
+
 		builder := QueryStackBuilder{
 			Model:     mod,
-			Query:     capsule.Query().Table(param.Table + " as " + param.Alias),
+			Query:     qb,
 			ColumnMap: map[string]ColumnMap{},
 		}
 

@@ -43,8 +43,10 @@ type Runner struct {
 	args       []interface{}
 	global     map[string]interface{}
 	invocation runnerInvocation
-	caches     map[string]*v8go.Object
-	scripts    map[string]*runnerScriptEntry
+	caches       map[string]*v8go.Object
+	scripts      map[string]*runnerScriptEntry
+	execCounter  uint64
+	lastHealthAt time.Time
 }
 
 type runnerScriptEntry struct {
@@ -583,6 +585,14 @@ func (runner *Runner) health() bool {
 		runner.mu.Unlock()
 		return true
 	}
+
+	runner.execCounter++
+	if runner.execCounter%500 != 0 && time.Since(runner.lastHealthAt) < 15*time.Second {
+		runner.mu.Unlock()
+		return true
+	}
+	runner.lastHealthAt = time.Now()
+
 	runner.status = RunnerStatusCleaning
 	iso := runner.iso
 	runner.mu.Unlock()

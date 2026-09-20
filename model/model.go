@@ -189,9 +189,7 @@ func LoadSource(source []byte, id string, file string) (*Model, error) {
 		}
 	}
 
-	rwlock.Lock()
-	Models[id] = mod
-	rwlock.Unlock()
+	SetModel(id, mod)
 	return mod, nil
 }
 
@@ -203,11 +201,8 @@ func (mod *Model) Reload() (*Model, error) {
 		return nil, err
 	}
 
-	// Update model under lock
-	rwlock.Lock()
-	defer rwlock.Unlock()
 	*mod = *new
-	Models[mod.ID] = mod
+	SetModel(mod.ID, mod)
 	return mod, nil
 }
 
@@ -265,11 +260,9 @@ func WithDonotInsertValues(v bool) MigrateOption {
 	}
 }
 
-// Select selects a model
+// Select selects a model (100% 纯无锁原子读)
 func Select(id string) *Model {
-	rwlock.RLock()
-	defer rwlock.RUnlock()
-	mod, has := Models[id]
+	mod, has := SelectFast(id)
 	if !has {
 		exception.New(
 			fmt.Sprintf("Model:%s; not found", id),
@@ -279,11 +272,9 @@ func Select(id string) *Model {
 	return mod
 }
 
-// Exists checks if model exists
+// Exists checks if model exists (100% 纯无锁原子读)
 func Exists(id string) bool {
-	rwlock.RLock()
-	defer rwlock.RUnlock()
-	_, has := Models[id]
+	_, has := SelectFast(id)
 	return has
 }
 

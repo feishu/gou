@@ -297,3 +297,13 @@ func (t *Task) deleteJob(id int) {
 
 	delete(t.jobs, id)
 }
+
+// StopAll 停止所有正在运行的后台任务工作池
+func StopAll() {
+	for _, t := range Tasks {
+		if t != nil {
+			t.Stop()
+		}
+	}
+}
+
