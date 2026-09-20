@@ -68,6 +68,10 @@ func (process *Process) Execute() (err error) {
 	}
 
 	// Slow-Path: monitor with external context via isolated buffered channel
+	if err := process.Context.Err(); err != nil {
+		return err
+	}
+
 	type execResult struct {
 		value interface{}
 		err   error
@@ -92,6 +96,9 @@ func (process *Process) Execute() (err error) {
 
 	select {
 	case <-process.Context.Done():
+		if process.Runtime != nil {
+			process.Runtime.Dispose()
+		}
 		return process.Context.Err()
 	case res := <-resChan:
 		if res.err != nil {

@@ -184,7 +184,9 @@ func LoadSource(source []byte, id string, file string) (*Model, error) {
 	mod.UniqueColumns = uniqueColumns
 
 	if capsule.Global != nil {
-		mod.Driver = capsule.Schema().MustGetConnection().Config.Driver
+		if primary, err := capsule.Global.Primary(); err == nil && primary.Config != nil {
+			mod.Driver = primary.Config.Driver
+		}
 	}
 
 	rwlock.Lock()

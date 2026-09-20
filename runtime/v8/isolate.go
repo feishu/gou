@@ -10,6 +10,7 @@ import (
 	evalT "github.com/yaoapp/gou/runtime/v8/functions/eval"
 	langT "github.com/yaoapp/gou/runtime/v8/functions/lang"
 	processT "github.com/yaoapp/gou/runtime/v8/functions/process"
+	consoleT "github.com/yaoapp/gou/runtime/v8/objects/console"
 	exceptionT "github.com/yaoapp/gou/runtime/v8/objects/exception"
 	fsT "github.com/yaoapp/gou/runtime/v8/objects/fs"
 	httpT "github.com/yaoapp/gou/runtime/v8/objects/http"
@@ -74,6 +75,7 @@ func MakeTemplate(iso *v8go.Isolate) *v8go.ObjectTemplate {
 	template.Set("log", logT.New().ExportObject(iso))
 	template.Set("time", timeT.New().ExportObject(iso))
 	template.Set("http", httpT.New(runtimeOption.DataRoot).ExportObject(iso))
+	template.Set("console", consoleT.New(runtimeOption.ConsoleMode).ExportObject(iso))
 
 	// set functions
 	template.Set("Exception", exceptionT.New().ExportFunction(iso))

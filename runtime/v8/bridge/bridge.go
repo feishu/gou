@@ -291,7 +291,7 @@ func jsValueParse(ctx *v8go.Context, value interface{}) (*v8go.Value, error) {
 		return nil, err
 	}
 
-	jsValue, err := v8go.JSONParse(ctx, string(data))
+	jsValue, err := v8go.JSONParseBytes(ctx, data)
 	if err != nil {
 		return nil, err
 	}

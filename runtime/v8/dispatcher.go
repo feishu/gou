@@ -195,7 +195,7 @@ func (dispatcher *Dispatcher) createWithTimeout(timeout time.Duration) error {
 	if dispatcher.total >= dispatcher.max {
 		err := fmt.Errorf("[dispatcher] the runner is max. availables:%d, total:%d, %s", len(dispatcher.availables), dispatcher.total, dispatcher.health)
 		dispatcher.mu.Unlock()
-		log.Error(err.Error())
+		log.Error("%s", err.Error())
 		return err
 	}
 	dispatcher.total++

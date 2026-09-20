@@ -107,7 +107,7 @@ func (runner *Runner) Start(ready chan error) error {
 	if runner.status != RunnerStatusInit {
 		runner.mu.Unlock()
 		err := fmt.Errorf("[runner] you can't start a runner with status: [%d]", runner.status)
-		log.Error(err.Error())
+		log.Error("%s", err.Error())
 		ready <- err
 		return err
 	}
@@ -234,13 +234,24 @@ func (runner *Runner) ExecInvocation(inv runnerInvocation) interface{} {
 	signal := runner.signal
 	runner.mu.Unlock()
 
-	log.Debug(fmt.Sprintf("2.  [%s] Exec script %s.%s. status:%d, keepalive:%v, signal:%d", runner.id, inv.script.ID, method, status, keepalive, signalLen))
+	log.Debug("2.  [%s] Exec script %s.%s. status:%d, keepalive:%v, signal:%d", runner.id, inv.script.ID, method, status, keepalive, signalLen)
 
 	select {
 	case signal <- RunnerCommandExec:
 	default:
 		return fmt.Errorf("[runner] command queue is full")
 	}
+
+	if inv.ctx != nil {
+		select {
+		case <-inv.ctx.Done():
+			runner.retireCurrentExecution()
+			return inv.ctx.Err()
+		case res := <-runner.chResp:
+			return res
+		}
+	}
+
 	select {
 	case res := <-runner.chResp:
 		return res
@@ -272,15 +283,15 @@ func (runner *Runner) exec() {
 			}
 			status, keepalive := runner.snapshot()
 			if !keepalive {
-				log.Debug(fmt.Sprintf("3.1 [%s] Send a destroy signal to the v8 runner. status:%d, keepalive:%v", runner.id, status, keepalive))
+				log.Debug("3.1 [%s] Send a destroy signal to the v8 runner. status:%d, keepalive:%v", runner.id, status, keepalive)
 				runner.sendCommand(RunnerCommandDestroy)
-				log.Debug(fmt.Sprintf("3.2 [%s] Send a destroy signal to the v8 runner. sstatus:%d, keepalive:%v (done)", runner.id, status, keepalive))
+				log.Debug("3.2 [%s] Send a destroy signal to the v8 runner. sstatus:%d, keepalive:%v (done)", runner.id, status, keepalive)
 				return
 			}
 
-			log.Debug(fmt.Sprintf("3.1 [%s] Send a reset signal to the v8 runner. status:%d, keepalive:%v", runner.id, status, keepalive))
+			log.Debug("3.1 [%s] Send a reset signal to the v8 runner. status:%d, keepalive:%v", runner.id, status, keepalive)
 			runner.sendCommand(RunnerCommandReset)
-			log.Debug(fmt.Sprintf("3.2 [%s] Send a reset signal to the v8 runner. status:%d, keepalive:%v (done)", runner.id, status, keepalive))
+			log.Debug("3.2 [%s] Send a reset signal to the v8 runner. status:%d, keepalive:%v (done)", runner.id, status, keepalive)
 		}()
 	}()
 
@@ -304,9 +315,11 @@ func (runner *Runner) _exec() {
 
 	scriptTarget := v8Debug.targetForScript(inv.script)
 	sessionTarget := v8Debug.sessionTargetForScript(inv.script)
-	log.Info(fmt.Sprintf("[V8 Debug] _exec script %s, scriptTarget: %t, sessionTarget: %t, inspector: %t", inv.script.ID, scriptTarget != nil, sessionTarget != nil, inspector != nil))
+	if sessionTarget != nil || scriptTarget != nil {
+		log.Info("[V8 Debug] _exec script %s, scriptTarget: %t, sessionTarget: %t, inspector: %t", inv.script.ID, scriptTarget != nil, sessionTarget != nil, inspector != nil)
+	}
 	if sessionTarget != nil && inspector != nil {
-		log.Info(fmt.Sprintf("[V8 Debug] attaching runner for script %s (target id: %s)", inv.script.ID, sessionTarget.id))
+		log.Info("[V8 Debug] attaching runner for script %s (target id: %s)", inv.script.ID, sessionTarget.id)
 		if lease, ok := sessionTarget.acquireRunnerLease(runner, inspector, ctx, inv.script); ok {
 			runner.mu.Lock()
 			runner.debugLease = lease
@@ -385,15 +398,18 @@ func (runner *Runner) _exec() {
 	}
 	defer v.Release()
 
-	// console.log("foo", "bar", 1, 2, 3, 4)
-	err = console.New(runtimeOption.ConsoleMode).Set("console", ctx)
-	if err != nil {
-		runner.chResp <- err
-		return
-	}
-
 	// Set the global data
 	global := ctx.Global()
+
+	// Ensure console is set on context if not provided by template
+	if global != nil && !global.Has("console") {
+		err = console.New(runtimeOption.ConsoleMode).Set("console", ctx)
+		if err != nil {
+			runner.chResp <- err
+			return
+		}
+	}
+
 	err = bridge.SetShareData(ctx, global, &bridge.Share{
 		Sid:    inv.sid,
 		Root:   inv.script.Root,
@@ -459,8 +475,8 @@ func (runner *Runner) destroy() {
 
 	runner.execution.waitInactive()
 
-	log.Debug(fmt.Sprintf("4.  [%s] destroy the runner. status:%d, keepalive:%v ", runner.id, RunnerStatusDestroy, keepalive))
-	log.Debug(fmt.Sprintf("--- [%s] end -----------------", runner.id))
+	log.Debug("4.  [%s] destroy the runner. status:%d, keepalive:%v ", runner.id, RunnerStatusDestroy, keepalive)
+	log.Debug("--- [%s] end -----------------", runner.id)
 
 	if dispatcher != nil {
 		dispatcher.runnerDestroyed(true)
@@ -495,8 +511,8 @@ func (runner *Runner) reset() bool {
 	keepalive := runner.keepalive
 	runner.mu.Unlock()
 
-	log.Debug(fmt.Sprintf("4.  [%s] reset the runner. status:%d, keepalive:%v ", runner.id, RunnerStatusCleaning, keepalive))
-	log.Debug(fmt.Sprintf("--- [%s] end -----------------", runner.id))
+	log.Debug("4.  [%s] reset the runner. status:%d, keepalive:%v ", runner.id, RunnerStatusCleaning, keepalive)
+	log.Debug("--- [%s] end -----------------", runner.id)
 
 	runner.mu.Lock()
 	ctx := runner.ctx
@@ -512,8 +528,11 @@ func (runner *Runner) reset() bool {
 		lease.Close()
 	}
 	if ctx != nil {
+		global := ctx.Global()
+		if global != nil {
+			_ = global.Delete("__yao_data")
+		}
 		ctx.ResetRetainedValues()
-		ctx.Close()
 	}
 
 	if runner.isClosed() {
@@ -532,15 +551,21 @@ func (runner *Runner) reset() bool {
 		return false
 	}
 
-	nextCtx := v8go.NewContext(iso, tmpl)
-	runner.mu.Lock()
-	if runner.closed {
+	if ctx == nil {
+		nextCtx := v8go.NewContext(iso, tmpl)
+		runner.mu.Lock()
+		if runner.closed {
+			runner.mu.Unlock()
+			nextCtx.Close()
+			runner.destroy()
+			return false
+		}
+		runner.ctx = nextCtx
+		ctx = nextCtx
 		runner.mu.Unlock()
-		nextCtx.Close()
-		runner.destroy()
-		return false
 	}
-	runner.ctx = nextCtx
+
+	runner.mu.Lock()
 	runner.status = RunnerStatusReady
 	runner.mu.Unlock()
 

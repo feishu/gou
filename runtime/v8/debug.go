@@ -350,7 +350,7 @@ func (manager *debugManager) handleVersion(w http.ResponseWriter, _ *http.Reques
 }
 
 func (manager *debugManager) handleList(w http.ResponseWriter, r *http.Request) {
-	log.Info(fmt.Sprintf("[V8 Debug] handleList requested from %s", r.RemoteAddr))
+	log.Info("[V8 Debug] handleList requested from %s", r.RemoteAddr)
 
 	if r.URL.Query().Get("all") != "1" {
 		writeDebugJSON(w, []debugTargetDescriptor{manager.runtimeDescriptor(r)})
@@ -371,7 +371,7 @@ func (manager *debugManager) handleList(w http.ResponseWriter, r *http.Request) 
 					}
 				}
 				if len(filtered) > 0 {
-					log.Info(fmt.Sprintf("[V8 Debug] handleList filtered by %s: %d -> %d targets", filterTitle, len(descriptors), len(filtered)))
+					log.Info("[V8 Debug] handleList filtered by %s: %d -> %d targets", filterTitle, len(descriptors), len(filtered))
 					writeDebugJSON(w, filtered)
 					return
 				}
@@ -407,10 +407,10 @@ func (manager *debugManager) handleNew(w http.ResponseWriter, r *http.Request) {
 
 func (manager *debugManager) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/ws/")
-	log.Info(fmt.Sprintf("[V8 Debug] handleWebSocket connect request for target id: %s", id))
+	log.Info("[V8 Debug] handleWebSocket connect request for target id: %s", id)
 	target := manager.findTarget(id)
 	if target == nil {
-		log.Warn(fmt.Sprintf("[V8 Debug] handleWebSocket target not found: %s", id))
+		log.Warn("[V8 Debug] handleWebSocket target not found: %s", id)
 		http.Error(w, "target not found", http.StatusNotFound)
 		return
 	}
@@ -538,7 +538,7 @@ func (target *debugTarget) acquireRunnerLease(runner *Runner, inspector *v8go.In
 	if script != nil {
 		scriptID = script.ID
 	}
-	log.Info(fmt.Sprintf("[V8 Debug] acquireRunnerLease script:%s, targetID:%s, sessionExist:%t, inspectorExist:%t, ctxExist:%t", scriptID, target.id, session != nil, inspector != nil, ctx != nil))
+	log.Info("[V8 Debug] acquireRunnerLease script:%s, targetID:%s, sessionExist:%t, inspectorExist:%t, ctxExist:%t", scriptID, target.id, session != nil, inspector != nil, ctx != nil)
 	if session == nil || inspector == nil || ctx == nil || script == nil {
 		return nil, false
 	}
