@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,6 +18,26 @@ import (
 
 // Upgraders have registered
 var Upgraders = map[string]*Upgrader{}
+var upgradersLock sync.RWMutex
+
+// SelectUpgrader safely retrieves an upgrader by name
+func SelectUpgrader(name string) (*Upgrader, bool) {
+	upgradersLock.RLock()
+	defer upgradersLock.RUnlock()
+	u, ok := Upgraders[name]
+	return u, ok
+}
+
+// AllUpgraders safely returns a copy of all registered upgraders
+func AllUpgraders() map[string]*Upgrader {
+	upgradersLock.RLock()
+	defer upgradersLock.RUnlock()
+	copied := make(map[string]*Upgrader, len(Upgraders))
+	for k, v := range Upgraders {
+		copied[k] = v
+	}
+	return copied
+}
 
 // NewUpgrader create a new WebSocket upgrader
 //
@@ -69,7 +90,9 @@ func NewUpgrader(name string, config ...[]byte) (*Upgrader, error) {
 	}
 
 	// register upgrader
+	upgradersLock.Lock()
 	Upgraders[name] = upgrader
+	upgradersLock.Unlock()
 
 	return upgrader, nil
 }

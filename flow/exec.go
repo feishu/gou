@@ -87,7 +87,7 @@ func (flow *Flow) FormatResult(ctx *Context) (interface{}, error) {
 		global = flow.Global
 	}
 	data := maps.Map{"$in": ctx.In, "$res": ctx.Res, "$global": global}
-	data = ctx.ExtendIn(data).Dot()
+	data = ctx.ExtendIn(data)
 	return helper.Bind(flow.Output, data), nil
 }
 
@@ -98,7 +98,7 @@ func (flow *Flow) ExecNode(node *Node, ctx *Context, prev int) ([]interface{}, e
 		global = flow.Global
 	}
 	data := maps.Map{"$in": ctx.In, "$res": ctx.Res, "$global": global}
-	data = ctx.ExtendIn(data).Dot()
+	data = ctx.ExtendIn(data)
 	var outs = []interface{}{}
 	var err error
 
@@ -122,7 +122,6 @@ func (flow *Flow) RunQuery(node *Node, ctx *Context, data maps.Map) (interface{}
 		res = resp
 	} else {
 		data["$out"] = resp
-		data = data.Dot()
 		for _, value := range node.Outs {
 			outs = append(outs, helper.Bind(value, data))
 		}
@@ -156,15 +155,23 @@ func (flow *Flow) RunProcess(node *Node, ctx *Context, data maps.Map) (interface
 			global = flow.Global
 		}
 
-		p := process.New(node.Process, args...).WithGlobal(global).WithSID(sid)
+		var c context.Context
 		if ctx.Context != nil && *ctx.Context != nil {
-			p = p.WithContext(*ctx.Context)
+			c = *ctx.Context
 		}
+
+		p, err := process.AcquireProcess(c, node.Process, args...)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		p.WithGlobal(global).WithSID(sid)
+		curSid := p.Sid
 		resp = p.Run()
 
-		// 当使用 Session start 设置SID时，仅记录到当前请求局部上下文，绝不踩踏全局指针！
-		if ctx.Sid == "" && p.Sid != "" {
-			ctx.Sid = p.Sid
+		// 仅记录到当前请求局部上下文，绝不踩踏全局指针！
+		if ctx.Sid == "" && curSid != "" {
+			ctx.Sid = curSid
 		}
 	}
 
@@ -172,7 +179,6 @@ func (flow *Flow) RunProcess(node *Node, ctx *Context, data maps.Map) (interface
 		res = resp
 	} else {
 		data["$out"] = resp
-		data = data.Dot()
 		for _, value := range node.Outs {
 			outs = append(outs, helper.Bind(value, data))
 		}

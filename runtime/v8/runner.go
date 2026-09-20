@@ -97,6 +97,7 @@ func NewRunner(keepalive bool, owner *Dispatcher) *Runner {
 		execution:  newRunnerExecutionLifecycle(),
 		signal:     make(chan uint8, 2),
 		destroyed:  make(chan struct{}),
+		chResp:     make(chan interface{}, 1),
 		keepalive:  keepalive,
 		status:     RunnerStatusInit,
 		scripts:    make(map[string]*runnerScriptEntry),
@@ -152,7 +153,9 @@ func (runner *Runner) Start(ready chan error) error {
 				}
 
 			case RunnerCommandExec:
-				runner.exec()
+				if !runner.exec() {
+					return nil
+				}
 
 			case RunnerCommandDestroy:
 				runner.destroy()
@@ -228,7 +231,11 @@ func (runner *Runner) ExecInvocation(inv runnerInvocation) interface{} {
 	runner.status = RunnerStatusRunning
 	runner.script = inv.script
 	runner.invocation = inv
-	runner.chResp = make(chan interface{}, 1)
+	// 复用预分配的常驻 chResp，若历史残留未取走则排空
+	select {
+	case <-runner.chResp:
+	default:
+	}
 	method := inv.method
 	status := runner.status
 	keepalive := runner.keepalive
@@ -276,29 +283,22 @@ func (runner *Runner) Context() (*v8go.Context, error) {
 	return runner.ctx, nil
 }
 
-func (runner *Runner) exec() {
-
-	defer func() {
-		go func() {
-			if runner.isClosed() || !runner.execution.reusable() {
-				return
-			}
-			status, keepalive := runner.snapshot()
-			if !keepalive {
-				log.Debug("3.1 [%s] Send a destroy signal to the v8 runner. status:%d, keepalive:%v", runner.id, status, keepalive)
-				runner.sendCommand(RunnerCommandDestroy)
-				log.Debug("3.2 [%s] Send a destroy signal to the v8 runner. sstatus:%d, keepalive:%v (done)", runner.id, status, keepalive)
-				return
-			}
-
-			log.Debug("3.1 [%s] Send a reset signal to the v8 runner. status:%d, keepalive:%v", runner.id, status, keepalive)
-			runner.sendCommand(RunnerCommandReset)
-			log.Debug("3.2 [%s] Send a reset signal to the v8 runner. status:%d, keepalive:%v (done)", runner.id, status, keepalive)
-		}()
-	}()
-
-	// runner.chResp <- "OK"
+func (runner *Runner) exec() bool {
 	runner._exec()
+
+	if runner.isClosed() || !runner.execution.reusable() {
+		runner.destroy()
+		return false
+	}
+	status, keepalive := runner.snapshot()
+	if !keepalive {
+		log.Debug("3.1 [%s] Send a destroy signal to the v8 runner. status:%d, keepalive:%v", runner.id, status, keepalive)
+		runner.destroy()
+		return false
+	}
+
+	log.Debug("3.1 [%s] Reset the v8 runner in-place. status:%d, keepalive:%v", runner.id, status, keepalive)
+	return runner.reset()
 }
 
 func (runner *Runner) _exec() {

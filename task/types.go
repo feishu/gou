@@ -24,21 +24,23 @@ var status = map[int]string{
 	WAITING: "WAITING",
 	RUNNING: "RUNNING",
 	SUCCESS: "SUCCESS",
-	FAILURE: "SUCCESS",
+	FAILURE: "FAILURE",
 }
 
 // Task the task struct
 type Task struct {
-	name     string
-	timeout  int
-	handlers *Handlers
-	pool     *Pool
-	jobs     map[int]*Job
-	jobsMu   sync.RWMutex
-	mutex    sync.Mutex
-	ctx      context.Context
-	cancel   context.CancelFunc
-	Option   Option
+	name           string
+	timeout        int
+	handlers       *Handlers
+	pool           *Pool
+	jobs           map[int]*Job
+	jobsMu         sync.RWMutex
+	completedOrder []int
+	counter        int64
+	mutex          sync.Mutex
+	ctx            context.Context
+	cancel         context.CancelFunc
+	Option         Option
 }
 
 // Option the task option

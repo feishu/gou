@@ -248,7 +248,7 @@ func processCreate(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	mod := Select(process.ID)
 	row := any.Of(process.Args[0]).Map().MapStrAny
-	return mod.MustCreate(row)
+	return mod.MustCreate(row, process.Context)
 }
 
 // processUpdate 运行模型 MustUpdate
@@ -257,7 +257,7 @@ func processUpdate(process *process.Process) interface{} {
 	mod := Select(process.ID)
 	id := process.Args[0]
 	row := any.Of(process.Args[1]).Map().MapStrAny
-	mod.MustUpdate(id, row)
+	mod.MustUpdate(id, row, process.Context)
 	return nil
 }
 
@@ -266,14 +266,14 @@ func processSave(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	mod := Select(process.ID)
 	row := any.Of(process.Args[0]).Map().MapStrAny
-	return mod.MustSave(row)
+	return mod.MustSave(row, process.Context)
 }
 
 // processDelete 运行模型 MustDelete
 func processDelete(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	mod := Select(process.ID)
-	mod.MustDelete(process.Args[0])
+	mod.MustDelete(process.Args[0], process.Context)
 	return nil
 }
 
@@ -281,7 +281,7 @@ func processDelete(process *process.Process) interface{} {
 func processDestroy(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	mod := Select(process.ID)
-	mod.MustDestroy(process.Args[0])
+	mod.MustDestroy(process.Args[0], process.Context)
 	return nil
 }
 
@@ -318,7 +318,7 @@ func processInsert(process *process.Process) interface{} {
 		}
 	}
 
-	mod.MustInsert(colums, rows)
+	mod.MustInsert(colums, rows, process.Context)
 	return nil
 }
 
@@ -329,6 +329,9 @@ func processUpdateWhere(process *process.Process) interface{} {
 	params, ok := AnyToQueryParam(process.Args[0])
 	if !ok {
 		exception.New("第1个查询参数错误 %v", 400, process.Args[0]).Throw()
+	}
+	if process.Context != nil {
+		params.Context = process.Context
 	}
 	row := any.Of(process.Args[1]).Map().MapStrAny
 	return mod.MustUpdateWhere(params, row)
@@ -342,6 +345,9 @@ func processDeleteWhere(process *process.Process) interface{} {
 	if !ok {
 		params = QueryParam{}
 	}
+	if process.Context != nil {
+		params.Context = process.Context
+	}
 	return mod.MustDeleteWhere(params)
 }
 
@@ -352,6 +358,9 @@ func processDestroyWhere(process *process.Process) interface{} {
 	params, ok := AnyToQueryParam(process.Args[0])
 	if !ok {
 		params = QueryParam{}
+	}
+	if process.Context != nil {
+		params.Context = process.Context
 	}
 	return mod.MustDestroyWhere(params)
 }
@@ -364,6 +373,9 @@ func processEachSave(process *process.Process) interface{} {
 	eachrow := map[string]interface{}{}
 	if process.NumOfArgsIs(2) {
 		eachrow = process.ArgsMap(1)
+	}
+	if process.Context != nil {
+		return mod.MustEachSaveWithContext(process.Context, rows, eachrow)
 	}
 	return mod.MustEachSave(rows, eachrow)
 }
@@ -386,7 +398,14 @@ func processEachSaveAfterDelete(process *process.Process) interface{} {
 		eachrow = process.ArgsMap(2)
 	}
 	if len(ids) > 0 {
-		mod.MustDeleteWhere(QueryParam{Wheres: []QueryWhere{{Column: "id", OP: "in", Value: ids}}})
+		param := QueryParam{Wheres: []QueryWhere{{Column: "id", OP: "in", Value: ids}}}
+		if process.Context != nil {
+			param.Context = process.Context
+		}
+		mod.MustDeleteWhere(param)
+	}
+	if process.Context != nil {
+		return mod.MustEachSaveWithContext(process.Context, rows, eachrow)
 	}
 	return mod.MustEachSave(rows, eachrow)
 }

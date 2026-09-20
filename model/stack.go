@@ -196,45 +196,92 @@ func (stack *QueryStack) paginate(page int, pagesize int, res *[][]maps.MapStrAn
 		defer log.With(log.F{"page": page, "pagesize": pagesize, "bindings": builder.Query.GetBindings()}).Trace("%s", builder.Query.ToSQL())
 	}
 
-	rows := []xun.R{}
-	pageRes := builder.Query.MustPaginate(pagesize, page)
-	for _, item := range pageRes.Items {
-		rows = append(rows, xun.MakeR(item))
-	}
+	pageRes := builder.Query.MustPaginateRecordSet(pagesize, page)
+	fmtRows := formatRecordSet(pageRes.RecordSet, builder.ColumnMap)
 
-	fmtRows := []maps.MapStr{}
-	for _, row := range rows {
-		fmtRow := maps.MapStr{}
-		for key, value := range row {
-			cmap, has := builder.ColumnMap[key]
-			if !has {
-				cmap, has = builder.ColumnMap[strings.ToLower(key)]
-			}
-			if has {
-				fmtRow[cmap.Export] = value
-				cmap.Column.FliterOut(value, fmtRow, cmap.Export)
-				continue
-			}
-			fmtRow[key] = value
-		}
-
-		// 仅在键名包含点符号时才执行深层递归 UnDot()，常规列跳过深度拆解以提升吞吐
-		hasDot := false
-		for k := range fmtRow {
-			if strings.ContainsRune(k, '.') {
-				hasDot = true
-				break
-			}
-		}
-		if hasDot {
-			fmtRows = append(fmtRows, fmtRow.UnDot())
-		} else {
-			fmtRows = append(fmtRows, fmtRow)
-		}
-	}
 	*res = append(*res, fmtRows)
 	stack.Next()
-	return pageRes
+	return xun.P{
+		Total:        pageRes.Total,
+		TotalPages:   pageRes.TotalPages,
+		PageSize:     pageRes.PageSize,
+		CurrentPage:  pageRes.CurrentPage,
+		NextPage:     pageRes.NextPage,
+		PreviousPage: pageRes.PreviousPage,
+		LastPage:     pageRes.LastPage,
+		Options:      pageRes.Options,
+	}
+}
+
+// colExtractPlan 列提取静态执行计划
+type colExtractPlan struct {
+	targetKey string
+	filterCol *Column
+	hasDot    bool
+}
+
+// compileColPlan 在处理行数据前，一次性编译所有列的映射规则与属性，消除行级重复查表
+func compileColPlan(columns []string, columnMap map[string]ColumnMap) ([]colExtractPlan, bool) {
+	plan := make([]colExtractPlan, len(columns))
+	anyDot := false
+	for i, col := range columns {
+		cmap, has := columnMap[col]
+		if !has {
+			cmap, has = columnMap[strings.ToLower(col)]
+		}
+		if has {
+			hasDot := strings.ContainsRune(cmap.Export, '.')
+			if hasDot {
+				anyDot = true
+			}
+			colPtr := cmap.Column
+			plan[i] = colExtractPlan{
+				targetKey: cmap.Export,
+				filterCol: colPtr,
+				hasDot:    hasDot,
+			}
+		} else {
+			hasDot := strings.ContainsRune(col, '.')
+			if hasDot {
+				anyDot = true
+			}
+			plan[i] = colExtractPlan{
+				targetKey: col,
+				filterCol: nil,
+				hasDot:    hasDot,
+			}
+		}
+	}
+	return plan, anyDot
+}
+
+// formatRecordSet 将 xun.RecordSet 二维紧凑数据转换为 []maps.MapStr (零中间哈希桶构造)
+func formatRecordSet(rs *xun.RecordSet, columnMap map[string]ColumnMap) []maps.MapStr {
+	if rs == nil || len(rs.Rows) == 0 {
+		return []maps.MapStr{}
+	}
+	colLen := len(rs.Columns)
+	plan, anyDot := compileColPlan(rs.Columns, columnMap)
+
+	fmtRows := make([]maps.MapStr, len(rs.Rows))
+	for rowIdx, row := range rs.Rows {
+		fmtRow := make(maps.MapStr, colLen)
+		for i, cp := range plan {
+			if i < len(row) {
+				val := row[i]
+				fmtRow[cp.targetKey] = val
+				if cp.filterCol != nil {
+					cp.filterCol.FliterOut(val, fmtRow, cp.targetKey)
+				}
+			}
+		}
+		if anyDot {
+			fmtRows[rowIdx] = fmtRow.UnDot()
+		} else {
+			fmtRows[rowIdx] = fmtRow
+		}
+	}
+	return fmtRows
 }
 
 func (stack *QueryStack) run(res *[][]maps.MapStrAny, builder QueryStackBuilder, param QueryStackParam) {
@@ -262,43 +309,14 @@ func (stack *QueryStack) run(res *[][]maps.MapStrAny, builder QueryStackBuilder,
 			Trace("QueryStack run()")
 	}
 
-	var rows []xun.R
+	var rs *xun.RecordSet
 	if unlimited {
-		rows = builder.Query.MustGet()
+		rs = builder.Query.MustGetRecordSet()
 	} else {
-		rows = builder.Query.Limit(limit).MustGet()
+		rs = builder.Query.Limit(limit).MustGetRecordSet()
 	}
 
-	fmtRows := []maps.MapStr{}
-	for _, row := range rows {
-		fmtRow := maps.MapStr{}
-		for key, value := range row {
-			cmap, has := builder.ColumnMap[key]
-			if !has {
-				cmap, has = builder.ColumnMap[strings.ToLower(key)]
-			}
-			if has {
-				fmtRow[cmap.Export] = value
-				cmap.Column.FliterOut(value, fmtRow, cmap.Export)
-				continue
-			}
-			fmtRow[key] = value
-		}
-
-		// 仅在键名包含点符号时才执行深层递归 UnDot()
-		hasDot := false
-		for k := range fmtRow {
-			if strings.ContainsRune(k, '.') {
-				hasDot = true
-				break
-			}
-		}
-		if hasDot {
-			fmtRows = append(fmtRows, fmtRow.UnDot())
-		} else {
-			fmtRows = append(fmtRows, fmtRow)
-		}
-	}
+	fmtRows := formatRecordSet(rs, builder.ColumnMap)
 	*res = append(*res, fmtRows)
 	stack.Next()
 }
@@ -359,52 +377,51 @@ func (stack *QueryStack) runHasMany(res *[][]maps.MapStrAny, builder QueryStackB
 	}
 
 	// 计算关联查询的行数限制：
-	// 针对多主记录场景，单层 SQL 的 LIMIT 不能直接使用单一的 limit（否则会导致后半段父记录数据被静默截断）
-	// 同时为了防止关联大表引发内存暴涨，按父记录数动态扩充安全上限：
 	perParentLimit := param.QueryParam.Limit
 	queryLimit := 0
 
 	if perParentLimit > 0 {
-		// 用户明确指定了每个父级最多需要的子记录数（如每个用户取 5 条最新订单）
 		queryLimit = perParentLimit * len(foreignIDs)
 	} else if perParentLimit == 0 {
-		// 用户未显式指定 limit：保留安全保护机制（防止全表扫描导致内存暴涨）
-		// 按每个父记录预留 100 条额度，而不是让所有父记录总共只能分 100 条
 		queryLimit = 100 * len(foreignIDs)
 	}
-	// perParentLimit < 0 时为显式不限制 (queryLimit = 0)
 
 	if queryLimit > 0 {
 		builder.Query.WhereIn(name, foreignIDs).Limit(queryLimit)
 	} else {
 		builder.Query.WhereIn(name, foreignIDs)
 	}
-	rows := builder.Query.MustGet()
+	rs := builder.Query.MustGetRecordSet()
 
 	// 格式化数据，使用归一化字符串键消除跨数据库驱动整数类型差异（如 int32 vs int64）
 	fmtRowMap := map[string][]maps.MapStr{}
-	fmtRows := []maps.MapStr{}
-	for _, row := range rows {
-		fmtRow := maps.MapStr{}
-		for key, value := range row {
-			cmap, has := builder.ColumnMap[key]
-			if !has {
-				cmap, has = builder.ColumnMap[strings.ToLower(key)]
+	colLen := len(rs.Columns)
+	plan, anyDot := compileColPlan(rs.Columns, builder.ColumnMap)
+	fmtRows := make([]maps.MapStr, len(rs.Rows))
+
+	for rowIdx, row := range rs.Rows {
+		fmtRow := make(maps.MapStr, colLen)
+		for i, cp := range plan {
+			if i < len(row) {
+				val := row[i]
+				fmtRow[cp.targetKey] = val
+				if cp.filterCol != nil {
+					cp.filterCol.FliterOut(val, fmtRow, cp.targetKey)
+				}
 			}
-			if has {
-				fmtRow[cmap.Export] = value
-				cmap.Column.FliterOut(value, fmtRow, cmap.Export)
-				continue
-			}
-			fmtRow[key] = value
 		}
 
-		unDotRows := fmtRow.UnDot()
-		fmtRows = append(fmtRows, unDotRows)
+		var unDotRow maps.MapStr
+		if anyDot {
+			unDotRow = fmtRow.UnDot()
+		} else {
+			unDotRow = fmtRow
+		}
+		fmtRows[rowIdx] = unDotRow
 
 		relVal := fmtRow.Get(rel.Key)
 		if k, ok := normalizeKey(relVal); ok {
-			fmtRowMap[k] = append(fmtRowMap[k], unDotRows)
+			fmtRowMap[k] = append(fmtRowMap[k], unDotRow)
 		}
 	}
 

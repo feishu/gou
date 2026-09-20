@@ -2,7 +2,7 @@ package websocket
 
 import (
 	"encoding/binary"
-	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 	"github.com/yaoapp/kun/log"
@@ -20,26 +20,26 @@ func newHub() *Hub {
 	}
 }
 
-// NextID return the next client ID
+// NextID return the next client ID (atomic monotonically increasing)
 func (h *Hub) NextID() uint32 {
-	var mutex sync.Mutex
-	mutex.Lock()
-	id := len(h.clients)
-	mutex.Unlock()
-	return uint32(id) + 1
+	return atomic.AddUint32(&h.counter, 1)
 }
 
-// Clients return the online clients
+// Clients return the online clients (thread-safe)
 func (h *Hub) Clients() []uint32 {
-	ids := []uint32{}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ids := make([]uint32, 0, len(h.clients))
 	for client := range h.clients {
 		ids = append(ids, client.id)
 	}
 	return ids
 }
 
-// Nums count the online client's nums
+// Nums count the online client's nums (thread-safe)
 func (h *Hub) Nums() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	return len(h.clients)
 }
 
@@ -59,21 +59,26 @@ LOOP:
 		select {
 
 		case client := <-h.register:
+			h.mu.Lock()
 			h.clients[client] = true
 			h.indexes[client.id] = client
+			h.mu.Unlock()
 
 		case client := <-h.unregister:
+			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.indexes, client.id)
 				delete(h.clients, client)
 				close(client.send)
 			}
+			h.mu.Unlock()
 
 		case message := <-h.direct:
 			if len(message) > 4 {
 				//  0-4 id, 4~N message eg: [0 0 0 1 49 124...]
 				id := binary.BigEndian.Uint32(message[0:4])
 				msg := message[4:]
+				h.mu.Lock()
 				if client, ok := h.indexes[id]; ok {
 					select {
 					case client.send <- msg:
@@ -83,9 +88,11 @@ LOOP:
 						delete(h.clients, client)
 					}
 				}
+				h.mu.Unlock()
 			}
 
 		case message := <-h.broadcast:
+			h.mu.Lock()
 			for client := range h.clients {
 				select {
 				case client.send <- message:
@@ -95,15 +102,16 @@ LOOP:
 					delete(h.clients, client)
 				}
 			}
+			h.mu.Unlock()
 
 		case exit := <-h.interrupt:
 			if exit == 1 {
+				h.mu.Lock()
 				for client := range h.clients {
 					err := client.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "Repair"))
 					log.Trace("Close Client Connection, %v", err)
-					// close(client.send)
-					// delete(h.clients, client)
 				}
+				h.mu.Unlock()
 				break LOOP
 			}
 		}

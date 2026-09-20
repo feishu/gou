@@ -1,6 +1,7 @@
 package v8
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -280,6 +281,18 @@ func (dispatcher *Dispatcher) selectTimeoutError(timeout time.Duration) error {
 
 // Select select a free v8 runner
 func (dispatcher *Dispatcher) Select(timeout time.Duration) (*Runner, error) {
+	return dispatcher.SelectContext(context.Background(), timeout)
+}
+
+// SelectContext select a free v8 runner with context
+func (dispatcher *Dispatcher) SelectContext(ctx context.Context, timeout time.Duration) (*Runner, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	recheck := time.NewTicker(10 * time.Millisecond)
@@ -291,6 +304,10 @@ func (dispatcher *Dispatcher) Select(timeout time.Duration) (*Runner, error) {
 	}
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		if time.Until(deadline) <= 0 {
 			dispatcher.timeoutCount()
 			return nil, dispatcher.selectTimeoutError(timeout)
@@ -328,7 +345,7 @@ func (dispatcher *Dispatcher) Select(timeout time.Duration) (*Runner, error) {
 					dispatcher.timeoutCount()
 					return nil, dispatcher.selectTimeoutError(timeout)
 				}
-				runner, err, done := dispatcher.waitAfterCreateFailure(timeout, deadline, timer)
+				runner, err, done := dispatcher.waitAfterCreateFailureContext(ctx, timeout, deadline, timer)
 				if done {
 					return runner, err
 				}
@@ -337,6 +354,9 @@ func (dispatcher *Dispatcher) Select(timeout time.Duration) (*Runner, error) {
 		}
 
 		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+
 		case runner := <-dispatcher.availables:
 			if err := dispatcher.claimRunner(runner); err != nil {
 				if runner != nil {
@@ -365,6 +385,14 @@ func (dispatcher *Dispatcher) Select(timeout time.Duration) (*Runner, error) {
 }
 
 func (dispatcher *Dispatcher) waitAfterCreateFailure(timeout time.Duration, deadline time.Time, timer *time.Timer) (*Runner, error, bool) {
+	return dispatcher.waitAfterCreateFailureContext(context.Background(), timeout, deadline, timer)
+}
+
+func (dispatcher *Dispatcher) waitAfterCreateFailureContext(ctx context.Context, timeout time.Duration, deadline time.Time, timer *time.Timer) (*Runner, error, bool) {
+	if err := ctx.Err(); err != nil {
+		return nil, err, true
+	}
+
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
 		dispatcher.timeoutCount()
@@ -380,6 +408,9 @@ func (dispatcher *Dispatcher) waitAfterCreateFailure(timeout time.Duration, dead
 	defer backoff.Stop()
 
 	select {
+	case <-ctx.Done():
+		return nil, ctx.Err(), true
+
 	case runner := <-dispatcher.availables:
 		if err := dispatcher.claimRunner(runner); err != nil {
 			if runner != nil {

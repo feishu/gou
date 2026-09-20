@@ -229,3 +229,44 @@ func TestFlowImmutableWithMethods(t *testing.T) {
 	assert.False(t, original == copied, "WithSID/WithGlobal must return a fresh copy")
 }
 
+// BenchmarkFlowExecution 压测包含复杂对象列表的 Flow 多节点流转开销
+func BenchmarkFlowExecution(b *testing.B) {
+	process.Register("mock.flow.bench.menu", func(p *process.Process) interface{} {
+		role := p.ArgsString(0)
+		return []interface{}{
+			map[string]interface{}{"name": "Dashboard", "role": role},
+			map[string]interface{}{"name": "Settings", "role": role},
+		}
+	})
+
+	benchFlow := &Flow{
+		ID:   "flow.bench.multi",
+		Name: "flow.bench.multi",
+		Nodes: []Node{
+			{
+				Name:    "user_info",
+				Process: "mock.flow.user",
+				Args:    []interface{}{"{{$in.0}}"},
+			},
+			{
+				Name:    "menus",
+				Process: "mock.flow.bench.menu",
+				Args:    []interface{}{"{{$res.user_info.role}}"},
+			},
+		},
+		Output: map[string]interface{}{
+			"user_id":  "{{$res.user_info.id}}",
+			"menu_one": "{{$res.menus[0].name}}",
+		},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, err := benchFlow.Exec("user-100")
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+

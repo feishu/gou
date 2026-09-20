@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -91,7 +92,7 @@ func (mod *Model) MustCount(param QueryParam) int {
 }
 
 // Create 创建单条数据, 返回新创建数据ID
-func (mod *Model) Create(row maps.MapStrAny) (int, error) {
+func (mod *Model) Create(row maps.MapStrAny, ctx ...context.Context) (int, error) {
 
 	errs := mod.Validate(row) // 输入数据校验
 	if len(errs) > 0 {
@@ -109,7 +110,7 @@ func (mod *Model) Create(row maps.MapStrAny) (int, error) {
 		row.Set("created_at", dbal.Raw("CURRENT_TIMESTAMP"))
 	}
 
-	id, err := capsule.Query().
+	id, err := mod.Query(ctx...).
 		Table(mod.MetaData.Table.Name).
 		InsertGetID(row)
 
@@ -121,8 +122,8 @@ func (mod *Model) Create(row maps.MapStrAny) (int, error) {
 }
 
 // MustCreate 创建单条数据, 返回新创建数据ID, 失败抛出异常
-func (mod *Model) MustCreate(row maps.MapStrAny) int {
-	id, err := mod.Create(row)
+func (mod *Model) MustCreate(row maps.MapStrAny, ctx ...context.Context) int {
+	id, err := mod.Create(row, ctx...)
 	if err != nil {
 		exception.Err(err, 500).Throw()
 	}
@@ -130,7 +131,7 @@ func (mod *Model) MustCreate(row maps.MapStrAny) int {
 }
 
 // Update 更新单条数据
-func (mod *Model) Update(id interface{}, row maps.MapStrAny) error {
+func (mod *Model) Update(id interface{}, row maps.MapStrAny, ctx ...context.Context) error {
 
 	errs := mod.Validate(row) // 输入数据校验
 	if len(errs) > 0 {
@@ -148,7 +149,7 @@ func (mod *Model) Update(id interface{}, row maps.MapStrAny) error {
 		row.Set("updated_at", dbal.Raw("CURRENT_TIMESTAMP"))
 	}
 
-	effect, err := capsule.Query().
+	effect, err := mod.Query(ctx...).
 		Table(mod.MetaData.Table.Name).
 		Where(mod.PrimaryKey, id).
 		Limit(1).
@@ -162,15 +163,15 @@ func (mod *Model) Update(id interface{}, row maps.MapStrAny) error {
 }
 
 // MustUpdate 更新单条数据, 失败抛出异常
-func (mod *Model) MustUpdate(id interface{}, row maps.MapStrAny) {
-	err := mod.Update(id, row)
+func (mod *Model) MustUpdate(id interface{}, row maps.MapStrAny, ctx ...context.Context) {
+	err := mod.Update(id, row, ctx...)
 	if err != nil {
 		exception.Err(err, 500).Throw()
 	}
 }
 
 // Upsert new records or update the existing ones.
-func (mod *Model) Upsert(row maps.MapStrAny, uniqueBy []interface{}, updateColumns []interface{}) (int, error) {
+func (mod *Model) Upsert(row maps.MapStrAny, uniqueBy []interface{}, updateColumns []interface{}, ctx ...context.Context) (int, error) {
 
 	errs := mod.Validate(row) // validate the input data
 	if len(errs) > 0 {
@@ -197,7 +198,7 @@ func (mod *Model) Upsert(row maps.MapStrAny, uniqueBy []interface{}, updateColum
 		updateColumns = columns
 	}
 
-	effect, err := capsule.Query().
+	effect, err := mod.Query(ctx...).
 		Table(mod.MetaData.Table.Name).
 		Upsert(row, uniqueBy, updateColumns)
 
@@ -209,8 +210,8 @@ func (mod *Model) Upsert(row maps.MapStrAny, uniqueBy []interface{}, updateColum
 }
 
 // MustUpsert Create or update a record matching the attributes, and fill it with values.
-func (mod *Model) MustUpsert(row maps.MapStrAny, uniqueBy []interface{}, updateColumns []interface{}) int {
-	id, err := mod.Upsert(row, uniqueBy, updateColumns)
+func (mod *Model) MustUpsert(row maps.MapStrAny, uniqueBy []interface{}, updateColumns []interface{}, ctx ...context.Context) int {
+	id, err := mod.Upsert(row, uniqueBy, updateColumns, ctx...)
 	if err != nil {
 		exception.Err(err, 500).Throw()
 	}
@@ -218,7 +219,7 @@ func (mod *Model) MustUpsert(row maps.MapStrAny, uniqueBy []interface{}, updateC
 }
 
 // Save 保存单条数据, 不存在创建记录, 存在更新记录,  返回数据ID
-func (mod *Model) Save(row maps.MapStrAny) (interface{}, error) {
+func (mod *Model) Save(row maps.MapStrAny, ctx ...context.Context) (interface{}, error) {
 
 	errs := mod.Validate(row) // 输入数据校验
 	if len(errs) > 0 {
@@ -242,7 +243,7 @@ func (mod *Model) Save(row maps.MapStrAny) (interface{}, error) {
 		}
 
 		id := row.Get(mod.PrimaryKey)
-		_, err := capsule.Query().
+		_, err := mod.Query(ctx...).
 			Table(mod.MetaData.Table.Name).
 			Where(mod.PrimaryKey, id).
 			Limit(1).
@@ -262,7 +263,7 @@ func (mod *Model) Save(row maps.MapStrAny) (interface{}, error) {
 		row.Del("updated_at") // 忽略更新字段
 	}
 
-	id, err := capsule.Query().
+	id, err := mod.Query(ctx...).
 		Table(mod.MetaData.Table.Name).
 		InsertGetID(row)
 
@@ -274,8 +275,8 @@ func (mod *Model) Save(row maps.MapStrAny) (interface{}, error) {
 }
 
 // MustSave 保存单条数据, 返回数据ID, 失败抛出异常
-func (mod *Model) MustSave(row maps.MapStrAny) interface{} {
-	id, err := mod.Save(row)
+func (mod *Model) MustSave(row maps.MapStrAny, ctx ...context.Context) interface{} {
+	id, err := mod.Save(row, ctx...)
 	if err != nil {
 		exception.Err(err, 500).Throw()
 	}
@@ -283,8 +284,13 @@ func (mod *Model) MustSave(row maps.MapStrAny) interface{} {
 }
 
 // Delete 删除单条记录
-func (mod *Model) Delete(id interface{}) error {
+func (mod *Model) Delete(id interface{}, ctx ...context.Context) error {
+	var c context.Context
+	if len(ctx) > 0 && ctx[0] != nil {
+		c = ctx[0]
+	}
 	_, err := mod.DeleteWhere(QueryParam{
+		Context: c,
 		Wheres: []QueryWhere{
 			{
 				Column: mod.PrimaryKey,
@@ -297,29 +303,29 @@ func (mod *Model) Delete(id interface{}) error {
 }
 
 // MustDelete 删除单条记录, 失败抛出异常
-func (mod *Model) MustDelete(id interface{}) {
-	err := mod.Delete(id)
+func (mod *Model) MustDelete(id interface{}, ctx ...context.Context) {
+	err := mod.Delete(id, ctx...)
 	if err != nil {
 		exception.Err(err, 500).Throw()
 	}
 }
 
 // Destroy 真删除单条记录
-func (mod *Model) Destroy(id interface{}) error {
-	_, err := capsule.Query().Table(mod.MetaData.Table.Name).Where(mod.PrimaryKey, id).Limit(1).Delete()
+func (mod *Model) Destroy(id interface{}, ctx ...context.Context) error {
+	_, err := mod.Query(ctx...).Table(mod.MetaData.Table.Name).Where(mod.PrimaryKey, id).Limit(1).Delete()
 	return err
 }
 
 // MustDestroy 真删除单条记录, 失败抛出异常
-func (mod *Model) MustDestroy(id interface{}) {
-	err := mod.Destroy(id)
+func (mod *Model) MustDestroy(id interface{}, ctx ...context.Context) {
+	err := mod.Destroy(id, ctx...)
 	if err != nil {
 		exception.Err(err, 500).Throw()
 	}
 }
 
 // Insert 插入多条数据
-func (mod *Model) Insert(columns []string, rows [][]interface{}) error {
+func (mod *Model) Insert(columns []string, rows [][]interface{}, ctx ...context.Context) error {
 
 	// 数据校验
 	errs := []ValidateResponse{}
@@ -372,15 +378,15 @@ func (mod *Model) Insert(columns []string, rows [][]interface{}) error {
 	}
 
 	// 写入到数据库
-	return capsule.Query().
+	return mod.Query(ctx...).
 		Table(mod.MetaData.Table.Name).
 		Insert(rows, columns)
 
 }
 
 // MustInsert 插入多条数据, 失败抛出异常
-func (mod *Model) MustInsert(columns []string, rows [][]interface{}) {
-	err := mod.Insert(columns, rows)
+func (mod *Model) MustInsert(columns []string, rows [][]interface{}, ctx ...context.Context) {
+	err := mod.Insert(columns, rows, ctx...)
 	if err != nil {
 		exception.Err(err, 500).Throw()
 	}
@@ -451,6 +457,11 @@ func (mod *Model) DeleteWhere(param QueryParam) (int, error) {
 		columns := []string{}
 		baseTimestamp := time.Now().UnixNano()
 
+		quote := "`"
+		if mod.Driver == "postgres" {
+			quote = `"`
+		}
+
 		for i, col := range mod.UniqueColumns {
 			typ := strings.ToLower(col.Type)
 			if typ == "string" {
@@ -459,12 +470,12 @@ func (mod *Model) DeleteWhere(param QueryParam) (int, error) {
 				data[col.Name] = dbal.Raw(fmt.Sprintf("CONCAT_WS('_', %s, '%d', '%d')", col.Name, baseTimestamp, i))
 				columns = append(
 					columns,
-					fmt.Sprintf("CONCAT('\"%s\":\"', `%s`, '\"')", col.Name, col.Name),
+					fmt.Sprintf("CONCAT('\"%s\":\"', %s%s%s, '\"')", col.Name, quote, col.Name, quote),
 				)
 			} else { // 数字, 布尔型等
 				columns = append(
 					columns,
-					fmt.Sprintf("CONCAT('\"%s\":', `%s`)", col.Name, col.Name),
+					fmt.Sprintf("CONCAT('\"%s\":', %s%s%s)", col.Name, quote, col.Name, quote),
 				)
 			}
 			if col.Nullable {
@@ -562,6 +573,11 @@ func (mod *Model) MustDestroyWhere(param QueryParam) int {
 
 // EachSave 批量保存数据, 返回数据ID集合
 func (mod *Model) EachSave(rows []map[string]interface{}, eachrow ...maps.MapStrAny) ([]interface{}, error) {
+	return mod.EachSaveWithContext(context.Background(), rows, eachrow...)
+}
+
+// EachSaveWithContext 批量保存数据(支持 Context 传递), 返回数据ID集合
+func (mod *Model) EachSaveWithContext(ctx context.Context, rows []map[string]interface{}, eachrow ...maps.MapStrAny) ([]interface{}, error) {
 	messages := []string{}
 	ids := []interface{}{}
 	for i, row := range rows {
@@ -578,9 +594,13 @@ func (mod *Model) EachSave(rows []map[string]interface{}, eachrow ...maps.MapStr
 
 		// check primary
 		if id, has := row[mod.PrimaryKey]; has {
-			_, err := mod.Find(id, QueryParam{Select: []interface{}{mod.PrimaryKey}})
+			findParam := QueryParam{Select: []interface{}{mod.PrimaryKey}}
+			if ctx != nil {
+				findParam.Context = ctx
+			}
+			_, err := mod.Find(id, findParam)
 			if err != nil { // id does not exists & create
-				_, err := mod.Create(row)
+				_, err := mod.Create(row, ctx)
 				if err != nil {
 					messages = append(messages, fmt.Sprintf("rows[%d]: %s", i, err.Error()))
 					continue
@@ -590,7 +610,7 @@ func (mod *Model) EachSave(rows []map[string]interface{}, eachrow ...maps.MapStr
 			}
 		}
 
-		id, err := mod.Save(row)
+		id, err := mod.Save(row, ctx)
 		if err != nil {
 			messages = append(messages, fmt.Sprintf("rows[%d]: %s", i, err.Error()))
 			continue
@@ -607,6 +627,15 @@ func (mod *Model) EachSave(rows []map[string]interface{}, eachrow ...maps.MapStr
 // MustEachSave 批量保存数据, 返回数据ID集合, 失败抛出异常
 func (mod *Model) MustEachSave(rows []map[string]interface{}, eachrow ...maps.MapStrAny) []interface{} {
 	ids, err := mod.EachSave(rows, eachrow...)
+	if err != nil {
+		exception.Err(err, 500).Throw()
+	}
+	return ids
+}
+
+// MustEachSaveWithContext 批量保存数据(支持 Context 传递), 失败抛出异常
+func (mod *Model) MustEachSaveWithContext(ctx context.Context, rows []map[string]interface{}, eachrow ...maps.MapStrAny) []interface{} {
+	ids, err := mod.EachSaveWithContext(ctx, rows, eachrow...)
 	if err != nil {
 		exception.Err(err, 500).Throw()
 	}

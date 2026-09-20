@@ -53,7 +53,9 @@ func NewRedis(host string, options ...string) (*Redis, error) {
 	inst.options.Addr = fmt.Sprintf("%s:%d", host, port)
 
 	client := redis.NewClient(inst.options).WithTimeout(inst.timeout)
-	_, err := client.Ping(context.Background()).Result()
+	pingCtx, pingCancel := inst.opContext()
+	defer pingCancel()
+	_, err := client.Ping(pingCtx).Result()
 	if err != nil {
 		log.Error("Session redis Ping: %s host: %s options: %v", err.Error(), host, options)
 		return nil, err
@@ -63,11 +65,29 @@ func NewRedis(host string, options ...string) (*Redis, error) {
 	return inst, nil
 }
 
+// opContext 构建受保护的带超时 Context
+func (redis *Redis) opContext(parent ...context.Context) (context.Context, context.CancelFunc) {
+	p := context.Background()
+	if len(parent) > 0 && parent[0] != nil {
+		p = parent[0]
+	}
+	t := redis.timeout
+	if t <= 0 {
+		t = 5 * time.Second
+	}
+	return context.WithTimeout(p, t)
+}
+
 // Init initialization
 func (redis *Redis) Init() {}
 
 // Set session value (基于 Redis Hash 聚合存储，1 RTT)
 func (redis *Redis) Set(id string, key string, value interface{}, timeout time.Duration) error {
+	return redis.SetWithContext(context.Background(), id, key, value, timeout)
+}
+
+// SetWithContext 携带父 Context 的会话写入方法
+func (redis *Redis) SetWithContext(parentCtx context.Context, id string, key string, value interface{}, timeout time.Duration) error {
 	hkey := fmt.Sprintf("yao:session:%s", id)
 	bytes, err := jsoniter.Marshal(value)
 	if err != nil {
@@ -77,7 +97,9 @@ func (redis *Redis) Set(id string, key string, value interface{}, timeout time.D
 
 	log.Debug("Session redis Set: %s KEY: %s VALUE: %v TS: %#v", hkey, key, value, timeout)
 
-	ctx := context.Background()
+	ctx, cancel := redis.opContext(parentCtx)
+	defer cancel()
+
 	pipe := redis.rdb.Pipeline()
 	pipe.HSet(ctx, hkey, key, bytes)
 	if timeout > 0 {
@@ -98,8 +120,14 @@ func (redis *Redis) Set(id string, key string, value interface{}, timeout time.D
 
 // Get session value (支持 Hash 优先 + 旧离散 String 双读回退与惰性迁移)
 func (redis *Redis) Get(id string, key string) (interface{}, error) {
+	return redis.GetWithContext(context.Background(), id, key)
+}
+
+// GetWithContext 携带父 Context 的会话读取方法
+func (redis *Redis) GetWithContext(parentCtx context.Context, id string, key string) (interface{}, error) {
 	hkey := fmt.Sprintf("yao:session:%s", id)
-	ctx := context.Background()
+	ctx, cancel := redis.opContext(parentCtx)
+	defer cancel()
 
 	// 1. 优先尝试从 Hash 读取
 	val, err := redis.rdb.HGet(ctx, hkey, key).Result()
@@ -153,9 +181,15 @@ func (redis *Redis) Get(id string, key string) (interface{}, error) {
 
 // Del session value
 func (redis *Redis) Del(id string, key string) error {
+	return redis.DelWithContext(context.Background(), id, key)
+}
+
+// DelWithContext 携带父 Context 的会话删除方法
+func (redis *Redis) DelWithContext(parentCtx context.Context, id string, key string) error {
 	hkey := fmt.Sprintf("yao:session:%s", id)
 	skey := fmt.Sprintf("yao:session:%s:%s", id, key)
-	ctx := context.Background()
+	ctx, cancel := redis.opContext(parentCtx)
+	defer cancel()
 
 	log.Debug("Session redis Del: %s field %s", hkey, key)
 	pipe := redis.rdb.Pipeline()
@@ -171,8 +205,14 @@ func (redis *Redis) Del(id string, key string) error {
 
 // Dump session data (使用 HGetAll 替代高危 KEYS 命令，1 RTT 完成全量拉取)
 func (redis *Redis) Dump(id string) (map[string]interface{}, error) {
+	return redis.DumpWithContext(context.Background(), id)
+}
+
+// DumpWithContext 携带父 Context 的全量拉取方法
+func (redis *Redis) DumpWithContext(parentCtx context.Context, id string) (map[string]interface{}, error) {
 	hkey := fmt.Sprintf("yao:session:%s", id)
-	ctx := context.Background()
+	ctx, cancel := redis.opContext(parentCtx)
+	defer cancel()
 
 	res := map[string]interface{}{}
 	fields, err := redis.rdb.HGetAll(ctx, hkey).Result()
@@ -207,7 +247,7 @@ func (redis *Redis) Dump(id string) (map[string]interface{}, error) {
 		}
 		for _, key := range keys {
 			pureKey := strings.TrimPrefix(key, prefix)
-			val, err := redis.Get(id, pureKey)
+			val, err := redis.GetWithContext(ctx, id, pureKey)
 			if err != nil {
 				res[pureKey] = nil
 				continue
@@ -225,11 +265,17 @@ func (redis *Redis) Dump(id string) (map[string]interface{}, error) {
 
 // SetMany 批量设置 session 键值对 (支持 BatchManager 接口，1 RTT Pipeline)
 func (redis *Redis) SetMany(id string, values map[string]interface{}, timeout time.Duration) error {
+	return redis.SetManyWithContext(context.Background(), id, values, timeout)
+}
+
+// SetManyWithContext 携带父 Context 的批量写入方法
+func (redis *Redis) SetManyWithContext(parentCtx context.Context, id string, values map[string]interface{}, timeout time.Duration) error {
 	if len(values) == 0 {
 		return nil
 	}
 	hkey := fmt.Sprintf("yao:session:%s", id)
-	ctx := context.Background()
+	ctx, cancel := redis.opContext(parentCtx)
+	defer cancel()
 
 	fields := make(map[string]interface{}, len(values))
 	oldKeys := make([]string, 0, len(values))
@@ -262,11 +308,17 @@ func (redis *Redis) SetMany(id string, values map[string]interface{}, timeout ti
 
 // GetMany 批量读取 session 键值对 (支持 BatchManager 接口，1 RTT HMGet)
 func (redis *Redis) GetMany(id string, keys []string) (map[string]interface{}, error) {
+	return redis.GetManyWithContext(context.Background(), id, keys)
+}
+
+// GetManyWithContext 携带父 Context 的批量读取方法
+func (redis *Redis) GetManyWithContext(parentCtx context.Context, id string, keys []string) (map[string]interface{}, error) {
 	if len(keys) == 0 {
 		return map[string]interface{}{}, nil
 	}
 	hkey := fmt.Sprintf("yao:session:%s", id)
-	ctx := context.Background()
+	ctx, cancel := redis.opContext(parentCtx)
+	defer cancel()
 
 	vals, err := redis.rdb.HMGet(ctx, hkey, keys...).Result()
 	res := make(map[string]interface{}, len(keys))
@@ -297,7 +349,7 @@ func (redis *Redis) GetMany(id string, keys []string) (map[string]interface{}, e
 
 	// 对 Hash 中未命中的 key 回退查询旧 String
 	for _, mKey := range missingKeys {
-		val, err := redis.Get(id, mKey)
+		val, err := redis.GetWithContext(ctx, id, mKey)
 		if err == nil && val != nil {
 			res[mKey] = val
 		} else {
@@ -310,11 +362,17 @@ func (redis *Redis) GetMany(id string, keys []string) (map[string]interface{}, e
 
 // DelMany 批量删除 session 键值对 (支持 BatchManager 接口，1 RTT Pipeline)
 func (redis *Redis) DelMany(id string, keys []string) error {
+	return redis.DelManyWithContext(context.Background(), id, keys)
+}
+
+// DelManyWithContext 携带父 Context 的批量删除方法
+func (redis *Redis) DelManyWithContext(parentCtx context.Context, id string, keys []string) error {
 	if len(keys) == 0 {
 		return nil
 	}
 	hkey := fmt.Sprintf("yao:session:%s", id)
-	ctx := context.Background()
+	ctx, cancel := redis.opContext(parentCtx)
+	defer cancel()
 
 	oldKeys := make([]string, len(keys))
 	for i, k := range keys {

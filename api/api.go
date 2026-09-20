@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/yaoapp/kun/log"
 
@@ -15,6 +16,7 @@ import (
 
 // APIs 已加载API列表
 var APIs = map[string]*API{}
+var rwlock sync.RWMutex
 
 // Load load the api
 func Load(file, id string, guard ...string) (*API, error) {
@@ -59,18 +61,24 @@ func LoadSource(file string, data []byte, id string, guard ...string) (*API, err
 		http.Guard = guard[0]
 	}
 
-	APIs[id] = &API{
+	instance := &API{
 		ID:   id,
 		File: file,
 		HTTP: http,
 		Type: "http",
 	}
 
-	return APIs[id], nil
+	rwlock.Lock()
+	APIs[id] = instance
+	rwlock.Unlock()
+
+	return instance, nil
 }
 
 // Select select api
 func Select(id string) *API {
+	rwlock.RLock()
+	defer rwlock.RUnlock()
 	api, has := APIs[id]
 	if !has {
 		exception.New("[API] %s not loaded", 500, id).Throw()
@@ -114,7 +122,14 @@ func SetRoutes(router *gin.Engine, path string, allows ...string) {
 	}))
 
 	// Load apis
-	for _, api := range APIs {
+	rwlock.RLock()
+	apis := make([]*API, 0, len(APIs))
+	for _, a := range APIs {
+		apis = append(apis, a)
+	}
+	rwlock.RUnlock()
+
+	for _, api := range apis {
 		api.HTTP.Routes(router, path, allows...)
 	}
 }

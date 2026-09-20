@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yaoapp/kun/log"
@@ -13,6 +14,7 @@ import (
 
 // Tasks the registered tasks
 var Tasks = map[string]*Task{}
+var rwlock sync.RWMutex
 
 // New create new task
 func New(handlers *Handlers, option Option) *Task {
@@ -42,16 +44,17 @@ func New(handlers *Handlers, option Option) *Task {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Task{
-		name:     option.Name,
-		handlers: handlers,
-		jobs:     map[int]*Job{},
-		jobsMu:   sync.RWMutex{},
-		mutex:    sync.Mutex{},
-		ctx:      ctx,
-		cancel:   cancel,
-		pool:     pool,
-		timeout:  option.Timeout,
-		Option:   option,
+		name:           option.Name,
+		handlers:       handlers,
+		jobs:           map[int]*Job{},
+		jobsMu:         sync.RWMutex{},
+		completedOrder: []int{},
+		mutex:          sync.Mutex{},
+		ctx:            ctx,
+		cancel:         cancel,
+		pool:           pool,
+		timeout:        option.Timeout,
+		Option:         option,
 	}
 }
 
@@ -180,7 +183,7 @@ func (t *Task) startWorker(w *Worker) {
 func (t *Task) start(job *Job) {
 
 	defer job.cancel()
-	defer t.deleteJob(job.id)
+	defer t.retainCompletedJob(job.id)
 
 	ch := make(chan interface{}, 1) // the result channel
 	chError := make(chan error, 1)  // the error channel
@@ -225,16 +228,14 @@ func (t *Task) start(job *Job) {
 }
 
 func (t *Task) nextID() int {
-	if t.handlers.NextID == nil {
-		return len(t.pool.jobque) + 1
-	}
-
-	id, err := t.handlers.NextID()
-	if err != nil {
+	if t.handlers != nil && t.handlers.NextID != nil {
+		id, err := t.handlers.NextID()
+		if err == nil {
+			return id
+		}
 		log.Error("[TASK] %s can't get next id (%s)", t.name, err.Error())
-		return len(t.pool.jobque) + 1
 	}
-	return id
+	return int(atomic.AddInt64(&t.counter, 1))
 }
 
 // exec excute the job
@@ -298,12 +299,38 @@ func (t *Task) deleteJob(id int) {
 	delete(t.jobs, id)
 }
 
+func (t *Task) retainCompletedJob(id int) {
+	t.jobsMu.Lock()
+	defer t.jobsMu.Unlock()
+
+	t.completedOrder = append(t.completedOrder, id)
+	maxRetained := 1024
+	if t.pool != nil && t.pool.max > 0 && t.pool.max*2 > maxRetained {
+		maxRetained = t.pool.max * 2
+	}
+
+	if len(t.completedOrder) > maxRetained {
+		evictCount := len(t.completedOrder) - maxRetained
+		for i := 0; i < evictCount; i++ {
+			delete(t.jobs, t.completedOrder[i])
+		}
+		t.completedOrder = t.completedOrder[evictCount:]
+	}
+}
+
 // StopAll 停止所有正在运行的后台任务工作池
 func StopAll() {
+	rwlock.RLock()
+	tasks := make([]*Task, 0, len(Tasks))
 	for _, t := range Tasks {
 		if t != nil {
-			t.Stop()
+			tasks = append(tasks, t)
 		}
+	}
+	rwlock.RUnlock()
+
+	for _, t := range tasks {
+		t.Stop()
 	}
 }
 

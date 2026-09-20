@@ -1163,7 +1163,7 @@ func (obj *Object) stringArrayValue(info *v8go.FunctionCallbackInfo, value []str
 		return obj.error(info, err)
 	}
 
-	val, err := v8go.JSONParse(info.Context(), string(v))
+	val, err := v8go.JSONParseBytes(info.Context(), v)
 	if err != nil {
 		return obj.error(info, err)
 	}

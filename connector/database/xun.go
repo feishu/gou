@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/yaoapp/gou/application"
 	"github.com/yaoapp/gou/helper"
@@ -30,14 +31,18 @@ type Xun struct {
 
 // XunOptions the connetion options
 type XunOptions struct {
-	DB          string    `json:"db"`
-	TablePrefix string    `json:"prefix"`
-	Collation   string    `json:"collation,omitempty"`
-	Charset     string    `json:"charset,omitempty"`
-	ParseTime   bool      `json:"parseTime,omitempty"`
-	Timeout     int       `json:"timeout,omitempty"`
-	File        string    `json:"file,omitempty"`
-	Hosts       []XunHost `json:"hosts"`
+	DB              string    `json:"db"`
+	TablePrefix     string    `json:"prefix"`
+	Collation       string    `json:"collation,omitempty"`
+	Charset         string    `json:"charset,omitempty"`
+	ParseTime       bool      `json:"parseTime,omitempty"`
+	Timeout         int       `json:"timeout,omitempty"`
+	File            string    `json:"file,omitempty"`
+	MaxOpen         int       `json:"max_open,omitempty"`
+	MaxIdle         int       `json:"max_idle,omitempty"`
+	IdleTimeout     int       `json:"idle_timeout,omitempty"`
+	ConnMaxLifetime int       `json:"lifetime,omitempty"`
+	Hosts           []XunHost `json:"hosts"`
 }
 
 // XunHost the connection host
@@ -158,6 +163,18 @@ func (x *Xun) makeConnections() (err error) {
 		}
 	}
 
+	if manager.Connections != nil {
+		manager.Connections.Range(func(key, value any) bool {
+			if conn, ok := value.(*capsule.Connection); ok {
+				conn.DB.SetMaxOpenConns(x.Options.MaxOpen)
+				conn.DB.SetMaxIdleConns(x.Options.MaxIdle)
+				conn.DB.SetConnMaxIdleTime(time.Duration(x.Options.IdleTimeout) * time.Second)
+				conn.DB.SetConnMaxLifetime(time.Duration(x.Options.ConnMaxLifetime) * time.Second)
+			}
+			return true
+		})
+	}
+
 	x.Manager = manager
 	return err
 }
@@ -167,6 +184,23 @@ func (x *Xun) setDefaults() error {
 	x.Options.Timeout = helper.EnvInt(x.Options.Timeout, 5)
 	if x.Options.Timeout == 0 {
 		x.Options.Timeout = 5
+	}
+
+	x.Options.MaxOpen = helper.EnvInt(x.Options.MaxOpen, 50)
+	if x.Options.MaxOpen <= 0 {
+		x.Options.MaxOpen = 50
+	}
+	x.Options.MaxIdle = helper.EnvInt(x.Options.MaxIdle, 10)
+	if x.Options.MaxIdle <= 0 {
+		x.Options.MaxIdle = 10
+	}
+	x.Options.IdleTimeout = helper.EnvInt(x.Options.IdleTimeout, 180)
+	if x.Options.IdleTimeout <= 0 {
+		x.Options.IdleTimeout = 180
+	}
+	x.Options.ConnMaxLifetime = helper.EnvInt(x.Options.ConnMaxLifetime, 1800)
+	if x.Options.ConnMaxLifetime <= 0 {
+		x.Options.ConnMaxLifetime = 1800
 	}
 
 	// for sqlite3

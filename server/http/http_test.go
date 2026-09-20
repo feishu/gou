@@ -26,6 +26,8 @@ func TestStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	assert.True(t, server.Ready())
+	assert.Equal(t, 5*time.Second, server.srv.ReadHeaderTimeout)
+	assert.Equal(t, 120*time.Second, server.srv.IdleTimeout)
 
 	status, data := get(t, server, "/api/status")
 	assert.Equal(t, 200, status)

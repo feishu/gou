@@ -47,7 +47,7 @@ func BeginTx(ctx ...context.Context) (*TxSession, error) {
 
 	return &TxSession{
 		Tx:    tx,
-		Query: qb,
+		Query: qb.WithTx(tx),
 	}, nil
 }
 
@@ -130,7 +130,13 @@ func Transaction(fn func(ctx context.Context) error, ctxs ...context.Context) (e
 func (mod *Model) Query(ctx ...context.Context) query.Query {
 	if len(ctx) > 0 && ctx[0] != nil {
 		if sess, ok := TxFromContext(ctx[0]); ok && sess != nil {
-			return sess.Query
+			if sess.Query != nil {
+				return sess.Query.WithContext(ctx[0])
+			}
+			return nil
+		}
+		if capsule.Global != nil {
+			return capsule.Query().WithContext(ctx[0])
 		}
 	}
 	return capsule.Query()

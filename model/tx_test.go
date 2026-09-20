@@ -2,9 +2,13 @@ package model
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/yaoapp/xun/capsule"
+	"github.com/yaoapp/xun/dbal/schema"
 )
 
 func TestTxContextInjection(t *testing.T) {
@@ -50,8 +54,6 @@ func TestTransactionRollbackOnPanic(t *testing.T) {
 func TestModelQuerySeam(t *testing.T) {
 	mod := &Model{ID: "test_model"}
 
-	// Without transaction context, should not panic and should delegate to global query
-	// (Note: capsule may panic if not initialized in unit test, which proves it reaches capsule)
 	ctx := context.Background()
 	sess := &TxSession{closed: false, Query: nil}
 	txCtx := WithTxContext(ctx, sess)
@@ -59,4 +61,68 @@ func TestModelQuerySeam(t *testing.T) {
 	// With tx context, Query should return the session's Query directly
 	q := mod.Query(txCtx)
 	assert.Nil(t, q)
+}
+
+func TestTransactionRealPhysicalRollback(t *testing.T) {
+	dbPath := "./test_tx_real.db"
+	_ = os.Remove(dbPath)
+	defer os.Remove(dbPath)
+
+	manager, err := capsule.Add("primary", "sqlite3", dbPath)
+	if err != nil {
+		t.Skip("sqlite3 not available for tx test:", err)
+		return
+	}
+	manager.SetAsGlobal()
+	defer manager.Close()
+
+	// 创建测试表
+	sch := capsule.Schema()
+	sch.MustDropTableIfExists("test_tx_users")
+	sch.MustCreateTable("test_tx_users", func(table schema.Blueprint) {
+		table.ID("id")
+		table.String("name", 50)
+	})
+
+	mod := &Model{
+		ID: "test_tx_user",
+		MetaData: MetaData{
+			Table: Table{Name: "test_tx_users"},
+		},
+	}
+
+	// 1. 测试 Transaction 闭包内报错自动回滚
+	err = Transaction(func(txCtx context.Context) error {
+		txQ := mod.Query(txCtx)
+		assert.NotNil(t, txQ)
+		assert.NotNil(t, txQ.Tx(), "事务 Context 中的 Query 必须绑定物理 Tx")
+
+		err := txQ.Table("test_tx_users").Insert(map[string]interface{}{"name": "rollback_user"})
+		assert.NoError(t, err)
+
+		// 事务内可查
+		has, err := txQ.Table("test_tx_users").Where("name", "rollback_user").Exists()
+		assert.NoError(t, err)
+		assert.True(t, has)
+
+		return fmt.Errorf("business error triggers rollback")
+	})
+	assert.Error(t, err)
+
+	// 事务外验证数据已真正物理回滚
+	hasAfter, err := capsule.Query().Table("test_tx_users").Where("name", "rollback_user").Exists()
+	assert.NoError(t, err)
+	assert.False(t, hasAfter, "报错后物理事务回滚，记录绝对不应存在")
+
+	// 2. 测试 Transaction 闭包成功提交
+	err = Transaction(func(txCtx context.Context) error {
+		txQ := mod.Query(txCtx)
+		return txQ.Table("test_tx_users").Insert(map[string]interface{}{"name": "commit_user"})
+	})
+	assert.NoError(t, err)
+
+	// 事务外验证数据已物理持久化
+	hasCommit, err := capsule.Query().Table("test_tx_users").Where("name", "commit_user").Exists()
+	assert.NoError(t, err)
+	assert.True(t, hasCommit, "成功提交后记录必须物理持久化")
 }

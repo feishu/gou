@@ -156,6 +156,32 @@ func TestConcurrentGuardsThreadSafety(t *testing.T) {
 	wg.Wait()
 }
 
+// TestProcessGuardContextPropagation 验证 ProcessGuard 正确向下游 Process 传递 HTTP Request Context
+func TestProcessGuardContextPropagation(t *testing.T) {
+	var receivedCtx context.Context
+	process.Register("test.guard.context", func(p *process.Process) interface{} {
+		receivedCtx = p.Context
+		return nil
+	})
+
+	router := gin.New()
+	router.Use(ProcessGuard("test.guard.context"))
+	router.GET("/guard/ctx", func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "ok"})
+	})
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(reqCtx, "GET", "/guard/ctx", nil)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	assert.Equal(t, 200, rec.Code)
+	assert.NotNil(t, receivedCtx, "Process in ProcessGuard must receive request Context")
+	assert.Equal(t, reqCtx, receivedCtx, "Process Context must match HTTP request Context")
+}
+
 // BenchmarkHandlerFastPath 基准测试同步 Fast-Path 执行效率
 func BenchmarkHandlerFastPath(b *testing.B) {
 	process.Register("test.bench.ping", func(p *process.Process) interface{} {
@@ -185,5 +211,77 @@ func BenchmarkHandlerFastPath(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
+	}
+}
+
+// TestExtractorPlan 验证预编译参数提取器的各个操作码提取准确性
+func TestExtractorPlan(t *testing.T) {
+	httpInst := HTTP{}
+	in := []interface{}{
+		"const-val",
+		123,
+		":fullpath",
+		"$query.keyword",
+		"$param.id",
+		"$header.Authorization",
+		"$payload.user_id",
+		":params",
+	}
+
+	extract := httpInst.parseIn(in)
+	assert.NotNil(t, extract)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	req, err := http.NewRequest("POST", "/api/users/42?keyword=yao&from=search", nil)
+	assert.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer test-token")
+
+	c.Request = req
+	c.Params = gin.Params{gin.Param{Key: "id", Value: "42"}}
+	c.Set("__payloads", map[string]interface{}{
+		"user_id": 999,
+	})
+
+	args := extract(c)
+	assert.Len(t, args, 8)
+	assert.Equal(t, "const-val", args[0])
+	assert.Equal(t, 123, args[1])
+	assert.Equal(t, "", args[2]) // 未挂在 gin 完整路由树上 fullpath 为空
+	assert.Equal(t, "yao", args[3])
+	assert.Equal(t, "42", args[4])
+	assert.Equal(t, "Bearer test-token", args[5])
+	assert.Equal(t, 999, args[6])
+}
+
+// BenchmarkExtractorPlan 基准测试参数提取器运行开销
+func BenchmarkExtractorPlan(b *testing.B) {
+	httpInst := HTTP{}
+	in := []interface{}{
+		"static",
+		"$query.page",
+		"$param.id",
+		"$header.User-Agent",
+		"$payload.role",
+	}
+
+	extract := httpInst.parseIn(in)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req, _ := http.NewRequest("POST", "/test/100?page=2", nil)
+	req.Header.Set("User-Agent", "Benchmark")
+	c.Request = req
+	c.Params = gin.Params{gin.Param{Key: "id", Value: "100"}}
+	c.Set("__payloads", map[string]interface{}{
+		"role": "admin",
+	})
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		args := extract(c)
+		_ = args
 	}
 }

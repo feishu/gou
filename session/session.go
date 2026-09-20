@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/yaoapp/kun/exception"
@@ -12,6 +13,7 @@ import (
 
 // Managers 已注册会话管理器
 var Managers = map[string]Manager{}
+var managersLock sync.RWMutex
 
 // Timeout 默认有效时间
 var Timeout time.Duration = 3600 * time.Second
@@ -23,11 +25,14 @@ var Name string = "buntdb"
 func init() {
 	db, _ := NewBuntDB(":memory:")
 	Register("buntdb", db)
+	Register("memory", db)
 }
 
 // Register 注册会话管理器
 func Register(name string, manger Manager) {
 	manger.Init()
+	managersLock.Lock()
+	defer managersLock.Unlock()
 	Managers[name] = manger
 }
 
@@ -38,10 +43,34 @@ func Global() *Session {
 
 // Use 选用会话管理器
 func Use(name string) *Session {
-	if manager, has := Managers[name]; has {
-		return &Session{Manager: manager, timeout: Timeout, name: name}
+	managersLock.RLock()
+	manager, has := Managers[name]
+	if !has {
+		// 优先回退到默认 Name ("buntdb")，再到 "memory"
+		if defaultMgr, ok := Managers[Name]; ok {
+			manager = defaultMgr
+			name = Name
+		} else if memMgr, ok := Managers["memory"]; ok {
+			manager = memMgr
+			name = "memory"
+		} else {
+			for k, v := range Managers {
+				manager = v
+				name = k
+				break
+			}
+		}
 	}
-	return &Session{Manager: Managers["memory"], timeout: Timeout, name: name}
+	managersLock.RUnlock()
+
+	if manager == nil {
+		db, _ := NewBuntDB(":memory:")
+		db.Init()
+		manager = db
+		name = "buntdb"
+	}
+
+	return &Session{Manager: manager, timeout: Timeout, name: name}
 }
 
 // ID 生成SessionID

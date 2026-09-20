@@ -18,6 +18,7 @@ type Process struct {
 	Runtime  Runtime                `json:"-"` // Runtime
 	Callback CallbackFunc           `json:"-"` // Callback
 	_val     *interface{}           // Value // The result of the process
+	fromPool bool                   // Whether allocated from sync.Pool
 }
 
 // CallbackFunc the callback function

@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/yaoapp/kun/maps"
+	"github.com/yaoapp/xun"
 )
 
 type mockStringer struct {
@@ -234,6 +235,122 @@ func TestHasManyLimitCalculationAndDeduplication(t *testing.T) {
 	}
 	assert.Len(t, existing, 5)
 	assert.Equal(t, "e", existing[4]["val"])
+}
+
+// TestFormatRecordSet 验证 RecordSet 高效转换与映射正确性
+func TestFormatRecordSet(t *testing.T) {
+	rs := &xun.RecordSet{
+		Columns: []string{"id", "user_name", "role.code"},
+		Rows: [][]interface{}{
+			{1, "alice", "admin"},
+			{2, "bob", "editor"},
+		},
+	}
+
+	colMap := map[string]ColumnMap{
+		"user_name": {Export: "name"},
+	}
+
+	fmtRows := formatRecordSet(rs, colMap)
+	assert.Len(t, fmtRows, 2)
+
+	// 第一行
+	assert.Equal(t, 1, fmtRows[0]["id"])
+	assert.Equal(t, "alice", fmtRows[0]["name"])
+	// 嵌套字段验证 (UnDot 行为)
+	roleObj, ok := fmtRows[0]["role"].(maps.MapStr)
+	assert.True(t, ok)
+	assert.Equal(t, "admin", roleObj["code"])
+
+	// 第二行
+	assert.Equal(t, 2, fmtRows[1]["id"])
+	assert.Equal(t, "bob", fmtRows[1]["name"])
+}
+
+// TestPaginateRecordSetFormatting 验证基于 RecordSet 的分页数据组织与元数据输出
+func TestPaginateRecordSetFormatting(t *testing.T) {
+	rs := &xun.RecordSet{
+		Columns: []string{"id", "title", "user.dept"},
+		Rows: [][]interface{}{
+			{1, "doc1", "tech"},
+			{2, "doc2", "sales"},
+		},
+	}
+
+	pageRes := xun.RecordSetPaginator{
+		RecordSet:    rs,
+		Total:        10,
+		TotalPages:   5,
+		PageSize:     2,
+		CurrentPage:  1,
+		NextPage:     2,
+		PreviousPage: -1,
+		LastPage:     5,
+	}
+
+	colMap := map[string]ColumnMap{
+		"title": {Export: "doc_title"},
+	}
+
+	fmtRows := formatRecordSet(pageRes.RecordSet, colMap)
+	assert.Len(t, fmtRows, 2)
+	assert.Equal(t, "doc1", fmtRows[0]["doc_title"])
+	assert.Equal(t, "tech", fmtRows[0]["user"].(maps.MapStr)["dept"])
+
+	response := maps.MapStrAny{}
+	response["data"] = fmtRows
+	response["pagesize"] = pageRes.PageSize
+	response["pagecnt"] = pageRes.TotalPages
+	response["page"] = pageRes.CurrentPage
+	response["next"] = pageRes.NextPage
+	response["prev"] = pageRes.PreviousPage
+	response["total"] = pageRes.Total
+
+	assert.Equal(t, 10, response["total"])
+	assert.Equal(t, 5, response["pagecnt"])
+	assert.Equal(t, 2, response["pagesize"])
+	assert.Equal(t, 1, response["page"])
+	assert.Equal(t, 2, response["next"])
+	assert.Equal(t, -1, response["prev"])
+	assert.Len(t, response["data"], 2)
+}
+
+
+// BenchmarkFormatRecordSet1000Rows 压测 1000 行 10 列 RecordSet 格式化开销
+func BenchmarkFormatRecordSet1000Rows(b *testing.B) {
+	columns := []string{"id", "title", "content", "status", "author_id", "view_count", "like_count", "created_at", "updated_at", "extra"}
+	rows := make([][]interface{}, 1000)
+	for r := 0; r < 1000; r++ {
+		row := make([]interface{}, len(columns))
+		row[0] = r
+		row[1] = "article title"
+		row[2] = "article content text body"
+		row[3] = "published"
+		row[4] = 42
+		row[5] = 1000 + r
+		row[6] = 50 + r
+		row[7] = "2026-09-20T12:00:00Z"
+		row[8] = "2026-09-20T12:00:00Z"
+		row[9] = "extra note"
+		rows[r] = row
+	}
+
+	rs := &xun.RecordSet{
+		Columns: columns,
+		Rows:    rows,
+	}
+
+	colMap := map[string]ColumnMap{
+		"title":   {Export: "article_title"},
+		"content": {Export: "body"},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		res := formatRecordSet(rs, colMap)
+		_ = res
+	}
 }
 
 

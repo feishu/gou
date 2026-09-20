@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -163,6 +164,12 @@ type Hub struct {
 
 	// Interrupt from the server
 	interrupt chan int
+
+	// counter for unique client id
+	counter uint32
+
+	// mu protect clients and indexes
+	mu sync.RWMutex
 }
 
 // BufferSize read and write buffer sizes

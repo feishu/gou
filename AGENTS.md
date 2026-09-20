@@ -78,3 +78,4 @@ gou/
 - **DO NOT** register processes after engine boot: all process handlers must be registered during module `Load()` or `init()`.
 - **DO NOT** pass non-reusable JSON strings across CGO; prefer raw binary bytes and `Uint8Array`.
 - **DO NOT** modify DSL definitions in memory without write-locking `sync.RWMutex`.
+- **DO NOT** re-acquire or nest the same `sync.Mutex` / `sync.RWMutex` across callers in the same execution path; Go mutexes are strictly non-reentrant and will cause immediate permanent self-deadlock.

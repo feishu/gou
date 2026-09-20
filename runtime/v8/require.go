@@ -1,6 +1,8 @@
 package v8
 
 import (
+	"fmt"
+
 	"github.com/yaoapp/gou/runtime/v8/bridge"
 	"rogchap.com/v8go"
 )
@@ -24,11 +26,14 @@ func Require(iso *v8go.Isolate) *v8go.FunctionTemplate {
 		}
 
 		id := jsArgs[0].String()
-		script := Scripts[id]
+		var script *Script
 		if share.Root {
-			if _, has := RootScripts[id]; has {
-				script = RootScripts[id]
-			}
+			script, err = SelectRoot(id)
+		} else {
+			script, err = Select(id)
+		}
+		if err != nil || script == nil {
+			return bridge.JsException(info.Context(), fmt.Sprintf("script %s not found", id))
 		}
 
 		globalName := "require"

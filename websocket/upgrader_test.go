@@ -1,61 +1,48 @@
 package websocket
 
-// var cstDialer = websocket.Dialer{
-// 	Subprotocols:     []string{"p1", "p2"},
-// 	ReadBufferSize:   1024,
-// 	WriteBufferSize:  1024,
-// 	HandshakeTimeout: 30 * time.Second,
-// }
+import (
+	"fmt"
+	"sync"
+	"testing"
 
-// func TestStart(t *testing.T) {
-// 	log.SetOutput(os.Stdout)
-// 	log.SetLevel(log.TraceLevel)
-// 	ws := &WebSocket{}
+	"github.com/stretchr/testify/assert"
+)
 
-// 	http.HandleFunc("/echo", func(rw http.ResponseWriter, r *http.Request) {
-// 		ws.Start(rw, r, nil)
-// 	})
+func TestConcurrentUpgraderRegistry(t *testing.T) {
+	var wg sync.WaitGroup
+	workers := 10
+	iterations := 20
 
-// 	go func() { http.ListenAndServe("127.0.0.1:5081", nil) }()
+	// 并发写
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				name := fmt.Sprintf("upgrader-%d-%d", workerID, i)
+				u, err := NewUpgrader(name)
+				assert.NoError(t, err)
+				assert.NotNil(t, u)
+			}
+		}(w)
+	}
 
-// 	for i := 0; i < 3; i++ {
-// 		time.Sleep(200 * time.Microsecond)
-// 		conn, err := Dial()
-// 		if err != nil || conn == nil {
-// 			continue
-// 		}
-// 		echo(t, conn)
-// 		break
-// 	}
-// }
+	// 并发读
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				name := fmt.Sprintf("upgrader-%d-%d", workerID, i)
+				_, _ = SelectUpgrader(name)
+				_ = AllUpgraders()
+			}
+		}(w)
+	}
 
-// func Dial() (*websocket.Conn, error) {
-// 	ws, _, err := cstDialer.Dial("ws://127.0.0.1:5081/echo", nil)
-// 	if err != nil {
-// 		log.Error("Dial: %v", err)
-// 	}
-// 	return ws, nil
-// }
+	wg.Wait()
 
-// func echo(t *testing.T, ws *websocket.Conn) {
-
-// 	const message = "Hello World!"
-// 	if err := ws.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
-// 		t.Fatalf("SetWriteDeadline: %v", err)
-// 	}
-// 	if err := ws.WriteMessage(websocket.TextMessage, []byte(message)); err != nil {
-// 		t.Fatalf("WriteMessage: %v", err)
-// 	}
-// 	if err := ws.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-// 		t.Fatalf("SetReadDeadline: %v", err)
-// 	}
-// 	_, p, err := ws.ReadMessage()
-// 	if err != nil {
-// 		t.Fatalf("ReadMessage: %v", err)
-// 	}
-// 	if string(p) != message {
-// 		t.Fatalf("message=%s, want %s", p, message)
-// 	}
-
-// 	log.Trace("Message:%s", message)
-// }
+	// 最终验证全部读取安全
+	all := AllUpgraders()
+	assert.GreaterOrEqual(t, len(all), workers*iterations)
+}

@@ -2,22 +2,77 @@ package api
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/yaoapp/gou/process"
-	"github.com/yaoapp/gou/session"
-	"github.com/yaoapp/gou/types"
 	"github.com/yaoapp/kun/exception"
-	"github.com/yaoapp/kun/maps"
 )
+
+// MaxBodySize 默认请求体上限 (32MB)
+var MaxBodySize int64 = 32 << 20
+
+func init() {
+	if val := os.Getenv("YAO_MAX_BODY_SIZE"); val != "" {
+		if size, err := strconv.ParseInt(val, 10, 64); err == nil && size >= 0 {
+			MaxBodySize = size
+		}
+	} else if val := os.Getenv("GOU_MAX_BODY_SIZE"); val != "" {
+		if size, err := strconv.ParseInt(val, 10, 64); err == nil && size >= 0 {
+			MaxBodySize = size
+		}
+	}
+}
+
+// SetMaxBodySize 设置全局请求体上限（字节数，0表示不限制）
+func SetMaxBodySize(size int64) {
+	MaxBodySize = size
+}
+
+// ReadBodyBytes 安全读取请求体并缓存，受 MaxBodySize 保护
+func ReadBodyBytes(c *gin.Context) ([]byte, error) {
+	if c.Request.Body == nil {
+		return nil, nil
+	}
+
+	if v, has := c.Get("__raw_body_bytes"); has {
+		if b, ok := v.([]byte); ok {
+			return b, nil
+		}
+	}
+
+	var reader io.Reader = c.Request.Body
+	if MaxBodySize > 0 {
+		if c.Writer != nil {
+			reader = http.MaxBytesReader(c.Writer, c.Request.Body, MaxBodySize)
+		} else {
+			reader = io.LimitReader(c.Request.Body, MaxBodySize+1)
+		}
+	}
+
+	bodyBytes, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+
+	if MaxBodySize > 0 && int64(len(bodyBytes)) > MaxBodySize {
+		return nil, &http.MaxBytesError{Limit: MaxBodySize}
+	}
+
+	c.Set("__raw_body_bytes", bodyBytes)
+	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	return bodyBytes, nil
+}
 
 // HTTPGuards 支持的中间件
 var HTTPGuards = map[string]gin.HandlerFunc{}
@@ -39,18 +94,23 @@ func ProcessGuard(name string, cors ...gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var body interface{}
 		if c.Request.Body != nil {
-			var bodyBytes []byte
-			if v, has := c.Get("__raw_body_bytes"); has {
-				if b, ok := v.([]byte); ok {
-					bodyBytes = b
+			bodyBytes, err := ReadBodyBytes(c)
+			if err != nil {
+				var maxBytesErr *http.MaxBytesError
+				if errors.As(err, &maxBytesErr) {
+					c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+						"code":    http.StatusRequestEntityTooLarge,
+						"message": fmt.Sprintf("Request entity too large, max body size is %d bytes", MaxBodySize),
+					})
+					c.Abort()
+					return
 				}
-			}
-			if bodyBytes == nil {
-				var err error
-				bodyBytes, err = io.ReadAll(c.Request.Body)
-				if err == nil {
-					c.Set("__raw_body_bytes", bodyBytes)
-				}
+				c.JSON(http.StatusBadRequest, gin.H{
+					"code":    http.StatusBadRequest,
+					"message": err.Error(),
+				})
+				c.Abort()
+				return
 			}
 
 			if bodyBytes != nil {
@@ -65,8 +125,6 @@ func ProcessGuard(name string, cors ...gin.HandlerFunc) gin.HandlerFunc {
 				} else {
 					body = string(bodyBytes)
 				}
-				// Reset body
-				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			}
 		}
 
@@ -88,11 +146,12 @@ func ProcessGuard(name string, cors ...gin.HandlerFunc) gin.HandlerFunc {
 			if len(cors) > 0 {
 				cors[0](c)
 			}
-			ex := exception.New(err.Error(), 500)
+			ex := exception.Err(err, 500)
 			c.JSON(ex.Code, gin.H{"code": ex.Code, "message": ex.Message})
 			c.Abort()
 			return
 		}
+		defer process.Release()
 
 		if sid, has := c.Get("__sid"); has { // Set session id
 			if sid, ok := sid.(string); ok {
@@ -106,17 +165,18 @@ func ProcessGuard(name string, cors ...gin.HandlerFunc) gin.HandlerFunc {
 			}
 		}
 
+		process.WithContext(c.Request.Context())
+
 		err = process.Execute()
 		if err != nil {
-			ex := exception.New(err.Error(), 500)
 			if len(cors) > 0 {
 				cors[0](c)
 			}
+			ex := exception.Err(err, 500)
 			c.JSON(ex.Code, gin.H{"code": ex.Code, "message": ex.Message})
 			c.Abort()
 			return
 		}
-		defer process.Release()
 
 		v := process.Value()
 		if data, ok := v.(map[string]interface{}); ok {
@@ -293,194 +353,10 @@ func (http HTTP) setCorsOption(path string, allows map[string]bool, router gin.I
 	})
 }
 
-// parseIn 接口传参解析 (这个函数应该重构)
+// parseIn 接口传参解析 (通过预编译 ExtractorPlan 消除中间闭包与动态扩容)
 func (http HTTP) parseIn(in []interface{}) func(c *gin.Context) []interface{} {
-
-	getValues := []func(c *gin.Context) interface{}{}
-	for _, value := range in {
-
-		v, ok := value.(string)
-		if !ok {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				return v
-			})
-			continue
-		}
-
-		if v == ":body" {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				if v, has := c.Get("__raw_body_bytes"); has {
-					if b, ok := v.([]byte); ok {
-						return string(b)
-					}
-				}
-				if c.Request.Body == nil {
-					return ""
-				}
-				rawBytes, err := io.ReadAll(c.Request.Body)
-				if err != nil {
-					panic(err)
-				}
-				c.Set("__raw_body_bytes", rawBytes)
-				c.Request.Body = io.NopCloser(bytes.NewReader(rawBytes))
-				return string(rawBytes)
-			})
-			continue
-		} else if v == ":fullpath" {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				return c.FullPath()
-			})
-			continue
-		} else if v == ":headers" {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				return c.Request.Header
-			})
-			continue
-		} else if v == ":payload" {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				value, has := c.Get("__payloads")
-				if !has {
-					return maps.MapStr{}
-				}
-				valueMap, ok := value.(map[string]interface{})
-				if !ok {
-					return maps.MapStr{}
-				}
-				return valueMap
-			})
-			continue
-		} else if v == ":query" {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				return c.Request.URL.Query()
-			})
-			continue
-		} else if v == ":form" {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				values := c.Request.PostForm
-				return values
-			})
-			continue
-		} else if v == ":params" || v == ":query-param" {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				values := c.Request.URL.Query()
-				return types.URLToQueryParam(values)
-			})
-			continue
-		} else if v == ":context" {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				return c
-			})
-			continue
-		}
-
-		arg := strings.Split(v, ".")
-		length := len(arg)
-		if arg[0] == "$form" && length == 2 {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				return c.PostForm(arg[1])
-			})
-		} else if arg[0] == "$param" && length == 2 {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				return c.Param(arg[1])
-			})
-
-		} else if arg[0] == "$query" && length == 2 {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				return c.Query(arg[1])
-			})
-
-		} else if arg[0] == "$payload" && length == 2 {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				if payloads, has := c.Get("__payloads"); has {
-					if value, has := payloads.(map[string]interface{})[arg[1]]; has {
-						return value
-					}
-				}
-				return ""
-			})
-
-		} else if arg[0] == "$session" && length == 2 {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				if sid := c.GetString("__sid"); sid != "" {
-					name := arg[1]
-					// 请求级会话快照缓存，避免同一 HTTP 请求内重复触发 Redis 远程 IO
-					var cache map[string]interface{}
-					if rawCache, exists := c.Get("__session_cache"); exists {
-						if m, ok := rawCache.(map[string]interface{}); ok {
-							cache = m
-						}
-					}
-					if cache == nil {
-						cache = make(map[string]interface{})
-						c.Set("__session_cache", cache)
-					}
-					if val, ok := cache[name]; ok {
-						return val
-					}
-					val := session.Global().ID(sid).MustGet(name)
-					cache[name] = val
-					return val
-				}
-				return ""
-			})
-
-		} else if arg[0] == "$header" && length == 2 {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				return c.GetHeader(arg[1])
-			})
-
-		} else if arg[0] == "$file" && length == 2 {
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-
-				file, err := c.FormFile(arg[1])
-				if err != nil {
-					return types.UploadFile{Error: fmt.Sprintf("%s %s", arg[1], err.Error())}
-				}
-
-				ext := filepath.Ext(file.Filename)
-				dir, err := os.MkdirTemp("", "upload")
-				if err != nil {
-					return types.UploadFile{Error: fmt.Sprintf("%s %s", arg[1], err.Error())}
-				}
-
-				tmpfile, err := os.CreateTemp(dir, fmt.Sprintf("file-*%s", ext))
-				if err != nil {
-					return types.UploadFile{Error: fmt.Sprintf("%s %s", arg[1], err.Error())}
-				}
-				defer tmpfile.Close()
-
-				if err := c.SaveUploadedFile(file, tmpfile.Name()); err != nil {
-					return types.UploadFile{Error: fmt.Sprintf("%s %s", arg[1], err.Error())}
-				}
-
-				uploadFile := types.UploadFile{
-					UID:      c.GetHeader("Content-Uid"),
-					Range:    c.GetHeader("Content-Range"),
-					Sync:     c.GetHeader("Content-Sync") == "true", // sync upload or not
-					Name:     file.Filename,
-					TempFile: tmpfile.Name(),
-					Size:     file.Size,
-					Header:   file.Header,
-				}
-				file = nil
-				tmpfile = nil
-				return uploadFile
-			})
-		} else { // 原始数值
-			new := v
-			getValues = append(getValues, func(c *gin.Context) interface{} {
-				return new
-			})
-		}
-	}
-
-	return func(c *gin.Context) []interface{} {
-		values := []interface{}{}
-		for _, get := range getValues {
-			values = append(values, get(c))
-		}
-		return values
-	}
+	plan := CompileExtractorPlan(in)
+	return plan.Execute
 }
 
 // router 方法设定

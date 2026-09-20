@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sync"
@@ -685,4 +686,16 @@ func TestProcessListConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestProcessWriteContextPropagation 验证 Process 写操作感知并响应 Context 取消
+func TestProcessWriteContextPropagation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 预先取消 context
+
+	p := process.New("models.user.create", map[string]interface{}{"name": "Cancelled"})
+	p.WithContext(ctx)
+	_, err := p.Exec()
+	assert.NotNil(t, err)
+	assert.Equal(t, context.Canceled, err)
 }

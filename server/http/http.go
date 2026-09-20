@@ -25,6 +25,14 @@ func New(router *gin.Engine, option Option) *Server {
 		option.DrainTimeout = 15 * time.Second
 	}
 
+	if option.ReadHeaderTimeout == 0 {
+		option.ReadHeaderTimeout = 5 * time.Second
+	}
+
+	if option.IdleTimeout == 0 {
+		option.IdleTimeout = 120 * time.Second
+	}
+
 	return &Server{
 		router: router,
 		option: &option,
@@ -46,6 +54,9 @@ func (server *Server) Event() chan uint8 {
 
 // Port get server port
 func (server *Server) Port() (int, error) {
+	if server.addr == nil {
+		return 0, fmt.Errorf("server is not started")
+	}
 	addr := strings.Split(server.addr.String(), ":")
 	if len(addr) != 2 {
 		return 0, fmt.Errorf("can't get port %s", server.addr.String())
@@ -89,7 +100,12 @@ func (server *Server) Start() error {
 
 	// network preparing
 	server.addr = listener.Addr()
-	srv := &http.Server{Addr: server.addr.String(), Handler: server.router}
+	srv := &http.Server{
+		Addr:              server.addr.String(),
+		Handler:           server.router,
+		ReadHeaderTimeout: server.option.ReadHeaderTimeout,
+		IdleTimeout:       server.option.IdleTimeout,
+	}
 	server.srv = srv
 
 	// close server
@@ -117,10 +133,11 @@ func (server *Server) Start() error {
 	}()
 
 	// WebSocket
-	if len(websocket.Upgraders) > 0 {
+	upgraders := websocket.AllUpgraders()
+	if len(upgraders) > 0 {
 
 		// Start WebSocket Hub
-		for id, upgrader := range websocket.Upgraders {
+		for id, upgrader := range upgraders {
 			upgrader.SetRouter(server.router)
 			go upgrader.Start()
 			log.Info("Websocket %s start", id)
@@ -128,7 +145,7 @@ func (server *Server) Start() error {
 
 		// Stop WebSocket Hub
 		defer func() {
-			for id, upgrader := range websocket.Upgraders {
+			for id, upgrader := range upgraders {
 				upgrader.Stop()
 				log.Info("Websocket %s quit", id)
 			}

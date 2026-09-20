@@ -71,10 +71,24 @@ func LoadSource(source []byte, id string, file string) (Connector, error) {
 		if label == "" {
 			label = id
 		}
-		AIConnectors = append(AIConnectors, Option{
-			Label: label,
-			Value: id,
-		})
+		found := false
+		for i, opt := range AIConnectors {
+			if opt.Value == id {
+				AIConnectors[i].Label = label
+				found = true
+				break
+			}
+		}
+		if !found {
+			AIConnectors = append(AIConnectors, Option{
+				Label: label,
+				Value: id,
+			})
+		}
+	}
+
+	if old, exists := Connectors[id]; exists && old != nil {
+		_ = old.Close()
 	}
 
 	Connectors[id] = c
@@ -96,6 +110,10 @@ func New(typ string, id string, dsl []byte) (Connector, error) {
 
 	rwlock.Lock()
 	defer rwlock.Unlock()
+
+	if old, exists := Connectors[id]; exists && old != nil {
+		_ = old.Close()
+	}
 
 	Connectors[id] = c
 	return Connectors[id], nil
@@ -123,6 +141,15 @@ func Remove(id string) error {
 		return fmt.Errorf("connector %s not loaded: %w", id, ErrConnectorNotFound)
 	}
 	delete(Connectors, id)
+
+	newAI := make([]Option, 0, len(AIConnectors))
+	for _, opt := range AIConnectors {
+		if opt.Value != id {
+			newAI = append(newAI, opt)
+		}
+	}
+	AIConnectors = newAI
+
 	return connector.Close()
 }
 

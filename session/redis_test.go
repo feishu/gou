@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -140,5 +141,32 @@ func TestRedisBatchOperations(t *testing.T) {
 	assert.Nil(t, ss.MustGet("k1"))
 	assert.Nil(t, ss.MustGet("k2"))
 	assert.Equal(t, float64(123), ss.MustGet("k3"))
+}
+
+func TestRedisOpContext(t *testing.T) {
+	r := &Redis{timeout: 50 * time.Millisecond}
+	ctx, cancel := r.opContext()
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("Context should not be done immediately")
+	default:
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	select {
+	case <-ctx.Done():
+		assert.Equal(t, context.DeadlineExceeded, ctx.Err())
+	default:
+		t.Fatal("Context should be timed out")
+	}
+
+	// 验证预取消父 Context 传播
+	parentCtx, parentCancel := context.WithCancel(context.Background())
+	parentCancel()
+	childCtx, childCancel := r.opContext(parentCtx)
+	defer childCancel()
+	assert.Equal(t, context.Canceled, childCtx.Err())
 }
 

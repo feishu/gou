@@ -1,9 +1,11 @@
 package v8
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/yaoapp/gou/application"
 	"github.com/yaoapp/gou/process"
 	"github.com/yaoapp/kun/exception"
+	"rogchap.com/v8go"
 )
 
 // Scripts loaded scripts
@@ -34,7 +37,7 @@ var internalKeepModuleSuffixes = []string{"/yao.ts", "/yao", "/gou", "/gou.ts"}
 var internalKeepModules = []string{"@yao", "@yaoapps", "@yaoapp", "@gou"}
 
 // the lock for the scripts
-var syncLock = sync.Mutex{}
+var syncLock = sync.RWMutex{}
 
 // GetModuleName get the module name
 func GetModuleName(file string) string {
@@ -95,6 +98,8 @@ func Exists(id string) bool {
 	if strings.HasPrefix(id, "scripts.") {
 		id = strings.Replace(id, "scripts.", "", 1)
 	}
+	syncLock.RLock()
+	defer syncLock.RUnlock()
 	_, has := Scripts[id]
 	return has
 }
@@ -131,14 +136,28 @@ func LoadRoot(file string, id string) (*Script, error) {
 	return script, nil
 }
 
-// CLearModules clear the modules cache
-func CLearModules() {
+// ResetScripts safely resets the global scripts registry under syncLock
+func ResetScripts() {
+	syncLock.Lock()
+	defer syncLock.Unlock()
+	Scripts = map[string]*Script{}
+}
+
+// ClearModules safely clears the modules cache under syncLock
+func ClearModules() {
+	syncLock.Lock()
+	defer syncLock.Unlock()
 	Modules = map[string]Module{}
 	ImportMap = map[string][]Import{}
 	clearSourceMaps()
 	if runtimeOption.TSConfig != nil {
 		runtimeOption.TSConfig.clearCache()
 	}
+}
+
+// CLearModules clear the modules cache (backward compatible alias)
+func CLearModules() {
+	ClearModules()
 }
 
 // TransformTS transform the typescript
@@ -194,6 +213,8 @@ func runtimeScriptSource(script *Script) string {
 func runtimeImportCodes(file string) []string {
 	importCodes := []string{}
 	loaded := map[string]bool{}
+	syncLock.RLock()
+	defer syncLock.RUnlock()
 	if imports, has := ImportMap[file]; has {
 		for _, imp := range imports {
 			module, has := Modules[imp.AbsPath]
@@ -595,6 +616,8 @@ func Transform(source string, globalName string) string {
 
 // Select a script
 func Select(id string) (*Script, error) {
+	syncLock.RLock()
+	defer syncLock.RUnlock()
 	script, has := Scripts[id]
 	if !has {
 		return nil, fmt.Errorf("script %s not exists", id)
@@ -604,6 +627,8 @@ func Select(id string) (*Script, error) {
 
 // SelectRoot a script with root privileges
 func SelectRoot(id string) (*Script, error) {
+	syncLock.RLock()
+	defer syncLock.RUnlock()
 
 	script, has := RootScripts[id]
 	if has {
@@ -658,14 +683,28 @@ func (script *Script) Exec(process *process.Process) interface{} {
 }
 
 func (script *Script) execPool(process *process.Process) interface{} {
-	runner, err := dispatcher.Select(time.Duration(runtimeOption.DefaultTimeout) * time.Millisecond)
+	ctx := process.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var cancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		timeout := script.ContextTimeout()
+		if timeout > 0 {
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+	}
+
+	runner, err := dispatcher.SelectContext(ctx, time.Duration(runtimeOption.DefaultTimeout)*time.Millisecond)
 	if err != nil {
 		exception.New("scripts.%s.%s %s", 500, script.ID, process.Method, err.Error()).Throw()
 		return nil
 	}
 
 	return runner.ExecInvocation(runnerInvocation{
-		ctx:    process.Context,
+		ctx:    ctx,
 		script: script,
 		method: process.Method,
 		args:   process.Args,
@@ -681,3 +720,61 @@ func (script *Script) ContextTimeout() time.Duration {
 	}
 	return time.Duration(runtimeOption.ContextTimeout) * time.Millisecond
 }
+
+// Prewarm 并发预热编译所有已加载脚本并生成全局 CodeCache，消除冷启动编译开销
+func Prewarm(parallelism ...int) error {
+	syncLock.RLock()
+	scripts := make([]*Script, 0, len(Scripts))
+	for _, script := range Scripts {
+		if script != nil && script.Source != "" && script.GetCodeCache() == nil {
+			scripts = append(scripts, script)
+		}
+	}
+	syncLock.RUnlock()
+
+	if len(scripts) == 0 {
+		return nil
+	}
+
+	p := runtime.NumCPU()
+	if len(parallelism) > 0 && parallelism[0] > 0 {
+		p = parallelism[0]
+	}
+	if p > len(scripts) {
+		p = len(scripts)
+	}
+
+	ch := make(chan *Script, len(scripts))
+	for _, s := range scripts {
+		ch <- s
+	}
+	close(ch)
+
+	var wg sync.WaitGroup
+	for i := 0; i < p; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			iso := v8go.NewIsolate()
+			defer iso.Dispose()
+
+			for script := range ch {
+				origin := script.File
+				if origin == "" {
+					origin = script.ID
+				}
+				instance, err := iso.CompileUnboundScript(script.Source, origin, v8go.CompileOptions{Mode: v8go.CompileModeEager})
+				if err == nil && instance != nil {
+					cache := instance.CreateCodeCache()
+					if cache != nil {
+						script.SetCodeCache(cache)
+					}
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	return nil
+}
+

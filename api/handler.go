@@ -1,10 +1,11 @@
 package api
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	nethttp "net/http"
 	"strings"
 	"sync"
 	"unicode"
@@ -26,7 +27,9 @@ import (
 // defaultHandler default handler
 func (path Path) defaultHandler(getArgs argsHandler) func(c *gin.Context) {
 	return func(c *gin.Context) {
-		path.setPayload(c)
+		if !path.setPayload(c) {
+			return
+		}
 		var status int = path.Out.Status
 		var contentType = path.reqContentType(c) // Get the defined content type at API DSL
 
@@ -61,7 +64,7 @@ func (path Path) writeResponse(c *gin.Context, resp interface{}, status int, con
 	if path.Out.Body != nil {
 		res := any.Of(resp)
 		if res.IsMap() {
-			data := res.Map().MapStrAny.Dot()
+			data := res.Map().MapStrAny
 			body = helper.Bind(path.Out.Body, data)
 		}
 	}
@@ -128,7 +131,9 @@ func (path Path) processHandler() func(c *gin.Context) {
 // redirectHandler default handler
 func (path Path) redirectHandler(getArgs argsHandler) func(c *gin.Context) {
 	return func(c *gin.Context) {
-		path.setPayload(c)
+		if !path.setPayload(c) {
+			return
+		}
 		contentType := path.reqContentType(c)
 
 		// run process with request context
@@ -160,10 +165,12 @@ func (path Path) redirectHandler(getArgs argsHandler) func(c *gin.Context) {
 func (path Path) streamHandler(getArgs argsHandler) func(c *gin.Context) {
 	return func(c *gin.Context) {
 
-		path.setPayload(c)
+		if !path.setPayload(c) {
+			return
+		}
 		path.reqContentType(c)
 
-		chanStream := make(chan ssEventData, 1)
+		chanStream := make(chan ssEventData, 64)
 		chanError := make(chan error, 1)
 		ctx, cancel := context.WithCancel(c.Request.Context())
 		defer cancel()
@@ -355,11 +362,18 @@ func (path Path) setResponseHeaders(c *gin.Context, resp interface{}, contentTyp
 	// Get Content-Type
 	headers := map[string]string{}
 	if len(path.Out.Headers) > 0 {
-		res := any.Of(resp)
+		var data map[string]interface{}
+		if m, ok := resp.(map[string]interface{}); ok {
+			data = m
+		} else {
+			res := any.Of(resp)
+			if res.IsMap() {
+				data = res.Map().MapStrAny
+			}
+		}
 
 		// Parse Headers
-		if res.IsMap() {
-			data := res.Map().MapStrAny.Dot()
+		if data != nil {
 			for name, value := range path.Out.Headers {
 				headers[name] = value
 				v := helper.Bind(value, data)
@@ -381,40 +395,38 @@ func (path Path) setResponseHeaders(c *gin.Context, resp interface{}, contentTyp
 	return contentType
 }
 
-func (path Path) setPayload(c *gin.Context) {
+func (path Path) setPayload(c *gin.Context) bool {
 	// 如果已被 Guard 或前置中间件解析缓存，直接复用
 	if _, exists := c.Get("__payloads"); exists {
-		return
+		return true
 	}
 
 	if strings.HasPrefix(strings.ToLower(c.GetHeader("content-type")), "application/json") {
 
 		if c.Request.Body == nil {
 			c.Set("__payloads", map[string]interface{}{})
-			return
+			return true
 		}
 
-		var rawBytes []byte
-		if v, has := c.Get("__raw_body_bytes"); has {
-			if b, ok := v.([]byte); ok {
-				rawBytes = b
+		rawBytes, err := ReadBodyBytes(c)
+		if err != nil {
+			var maxBytesErr *nethttp.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				c.JSON(nethttp.StatusRequestEntityTooLarge, gin.H{
+					"code":    nethttp.StatusRequestEntityTooLarge,
+					"message": fmt.Sprintf("Request entity too large, max body size is %d bytes", MaxBodySize),
+				})
+				c.Abort()
+				return false
 			}
-		}
-
-		if rawBytes == nil {
-			var err error
-			rawBytes, err = io.ReadAll(c.Request.Body)
-			if err != nil {
-				c.Set("__payloads", map[string]interface{}{})
-				log.Error("[Path] %s %s", path.Path, err.Error())
-				return
-			}
-			c.Set("__raw_body_bytes", rawBytes)
+			c.Set("__payloads", map[string]interface{}{})
+			log.Error("[Path] %s %s", path.Path, err.Error())
+			return true
 		}
 
 		if len(rawBytes) == 0 {
 			c.Set("__payloads", map[string]interface{}{})
-			return
+			return true
 		}
 
 		if isFirstNonSpaceChar(string(rawBytes), '{') {
@@ -426,9 +438,8 @@ func (path Path) setPayload(c *gin.Context) {
 			}
 			c.Set("__payloads", payloads)
 		}
-
-		c.Request.Body = io.NopCloser(bytes.NewReader(rawBytes))
 	}
+	return true
 }
 
 func isFirstNonSpaceChar(text string, char rune) bool {

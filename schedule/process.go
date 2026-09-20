@@ -2,6 +2,7 @@ package schedule
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/robfig/cron/v3"
 	"github.com/yaoapp/gou/application"
@@ -14,6 +15,7 @@ import (
 
 // Schedules the registered schedules
 var Schedules = map[string]*Schedule{}
+var rwlock sync.RWMutex
 
 // ScheduleHandlers chedule process handlers
 var ScheduleHandlers = map[string]process.Handler{
@@ -66,12 +68,18 @@ func Load(file string, name string) (*Schedule, error) {
 
 	sch.cron = c
 	sch.id = id
+
+	rwlock.Lock()
 	Schedules[name] = sch
+	rwlock.Unlock()
+
 	return sch, nil
 }
 
 // Select select schedule by name
 func Select(name string) *Schedule {
+	rwlock.RLock()
+	defer rwlock.RUnlock()
 	sch, has := Schedules[name]
 	if !has {
 		exception.New("Schedule:%s does not load", 500, name).Throw()
@@ -150,10 +158,17 @@ func processScheduleStop(process *process.Process) interface{} {
 
 // StopAll 停止所有正在运行的 Cron 定时任务并重置状态
 func StopAll() {
+	rwlock.RLock()
+	schedules := make([]*Schedule, 0, len(Schedules))
 	for _, sch := range Schedules {
 		if sch != nil && sch.cron != nil {
-			sch.Stop()
+			schedules = append(schedules, sch)
 		}
+	}
+	rwlock.RUnlock()
+
+	for _, sch := range schedules {
+		sch.Stop()
 	}
 }
 

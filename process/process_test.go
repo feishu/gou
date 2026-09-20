@@ -474,3 +474,61 @@ func TestProcessInterceptorPipeline(t *testing.T) {
 	assert.Equal(t, "result", val)
 	assert.Equal(t, []string{"before_1", "before_2", "core", "after_2", "after_1"}, order)
 }
+
+func TestProcessRouteCache(t *testing.T) {
+	prepare(t)
+	p1, err := Of("models.user.pet.Find", 1)
+	assert.NoError(t, err)
+	assert.Equal(t, "models", p1.Group)
+	assert.Equal(t, "user.pet", p1.ID)
+	assert.Equal(t, "Find", p1.Method)
+	assert.Equal(t, "models.find", p1.Handler)
+
+	// 第二次调用命中 routeCache
+	p2, err := Of("models.user.pet.Find", 2)
+	assert.NoError(t, err)
+	assert.Equal(t, p1.Group, p2.Group)
+	assert.Equal(t, p1.ID, p2.ID)
+	assert.Equal(t, p1.Method, p2.Method)
+	assert.Equal(t, p1.Handler, p2.Handler)
+}
+
+func TestAcquireProcessPool(t *testing.T) {
+	prepare(t)
+	Register("test.pool.echo", func(p *Process) interface{} {
+		return p.Args[0]
+	})
+
+	ctx := context.Background()
+	p, err := AcquireProcess(ctx, "test.pool.echo", "hello-pooled")
+	assert.NoError(t, err)
+	assert.True(t, p.fromPool)
+
+	err = p.Execute()
+	assert.NoError(t, err)
+	assert.Equal(t, "hello-pooled", p.Value())
+
+	p.Release()
+	assert.Nil(t, p.Context)
+	assert.Equal(t, 0, len(p.Args))
+	assert.Equal(t, "", p.Name)
+}
+
+func BenchmarkProcessAcquireExecute(b *testing.B) {
+	Register("test.bench.pooled", func(p *Process) interface{} {
+		return "ok"
+	})
+
+	ctx := context.Background()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		p, err := AcquireProcess(ctx, "test.bench.pooled", "arg1")
+		if err != nil {
+			b.Fatal(err)
+		}
+		_ = p.Execute()
+		p.Release()
+	}
+}
+

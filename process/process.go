@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/fatih/color"
 	jsoniter "github.com/json-iterator/go"
@@ -12,6 +13,30 @@ import (
 
 // Handlers ProcessHanlders
 var Handlers = map[string]Handler{}
+
+var processPool = sync.Pool{
+	New: func() interface{} {
+		return &Process{
+			Args:     make([]interface{}, 0, 8),
+			fromPool: true,
+		}
+	},
+}
+
+// AcquireProcess 从对象池获取并初始化 Process (零额外堆逃逸)
+func AcquireProcess(ctx context.Context, name string, args ...interface{}) (*Process, error) {
+	p := processPool.Get().(*Process)
+	p.Reset()
+	p.fromPool = true
+	p.Name = name
+	p.Args = append(p.Args, args...)
+	p.Context = ctx
+	if err := p.make(); err != nil {
+		p.Release()
+		return nil, err
+	}
+	return p, nil
+}
 
 // New make a new process
 func New(name string, args ...interface{}) *Process {
@@ -88,9 +113,40 @@ func (process *Process) ExecuteSync() (err error) {
 	return process.Execute()
 }
 
-// Release the value of the process
-func (process *Process) Release() {
+// Reset 重置 Process 状态
+func (process *Process) Reset() {
+	process.Name = ""
+	process.Group = ""
+	process.Method = ""
+	process.ID = ""
+	process.Handler = ""
+	process.Sid = ""
+	process.Context = nil
+	if process.Runtime != nil {
+		process.Runtime.Dispose()
+		process.Runtime = nil
+	}
+	process.Callback = nil
 	process._val = nil
+	process.Args = process.Args[:0]
+	if process.Global != nil {
+		for k := range process.Global {
+			delete(process.Global, k)
+		}
+	}
+}
+
+// Release the value of the process, and return to pool if fromPool is true
+func (process *Process) Release() {
+	if process == nil {
+		return
+	}
+	process._val = nil
+	if process.fromPool {
+		process.fromPool = false
+		process.Reset()
+		processPool.Put(process)
+	}
 }
 
 // Dispose the process after run success
@@ -115,22 +171,22 @@ func (process *Process) Value() interface{} {
 
 // Run the process
 func (process *Process) Run() interface{} {
+	defer process.Release()
 	err := process.Execute()
 	if err != nil {
 		exception.New("%s", 500, err.Error()).Throw()
 		return nil
 	}
-	defer process.Release()
 	return process.Value()
 }
 
 // Exec execute the process and return value and error
 func (process *Process) Exec() (value interface{}, err error) {
+	defer process.Release()
 	err = process.Execute()
 	if err != nil {
 		return nil, err
 	}
-	defer process.Release()
 	return process.Value(), nil
 }
 
@@ -211,96 +267,105 @@ func (process *Process) handler() (Handler, error) {
 	return nil, fmt.Errorf("Exception|404:%s Handler -> %s not found", process.Name, process.Handler)
 }
 
-// make parse the process
-func (process *Process) make() error {
-	fields := strings.Split(process.Name, ".")
+// Route 静态进程路由元数据
+type Route struct {
+	Group   string
+	Method  string
+	ID      string
+	Handler string
+}
+
+var routeCache sync.Map // map[string]Route
+
+// parseRoute 解析进程路由信息
+func parseRoute(name string) (Route, error) {
+	fields := strings.Split(name, ".")
 	if len(fields) < 2 {
-		return fmt.Errorf("Exception|404:%s not found", process.Name)
+		return Route{}, fmt.Errorf("Exception|404:%s not found", name)
 	}
 
-	process.Group = fields[0]
-	switch process.Group {
-
+	route := Route{Group: fields[0]}
+	switch route.Group {
 	case "models", "schemas", "stores", "fs", "tasks", "schedules":
-		// models.user.pet.Find
-		process.Method = fields[len(fields)-1]
-		process.ID = strings.ToLower(strings.Join(fields[1:len(fields)-1], "."))
-		process.Handler = strings.ToLower(fmt.Sprintf("%s.%s", process.Group, process.Method))
-		break
+		route.Method = fields[len(fields)-1]
+		route.ID = strings.ToLower(strings.Join(fields[1:len(fields)-1], "."))
+		route.Handler = strings.ToLower(fmt.Sprintf("%s.%s", route.Group, route.Method))
 
 	case "flows", "pipes":
-		process.Handler = process.Group
-		process.ID = strings.ToLower(strings.Join(fields[1:], "."))
-		break
+		route.Handler = route.Group
+		route.ID = strings.ToLower(strings.Join(fields[1:], "."))
 
 	case "aigcs":
 		if len(fields) < 2 {
-			return fmt.Errorf("Exception|404:%s not found", process.Name)
+			return Route{}, fmt.Errorf("Exception|404:%s not found", name)
 		}
-		// aigcs.translate
-		process.Handler = strings.ToLower(process.Group)
-		process.ID = strings.ToLower(strings.ToLower(strings.Join(fields[1:], ".")))
-		break
+		route.Handler = strings.ToLower(route.Group)
+		route.ID = strings.ToLower(strings.Join(fields[1:], "."))
 
-	// The services scripts under the services directory
 	case "services":
 		if len(fields) < 3 {
-			return fmt.Errorf("Exception|404:%s not found", process.Name)
+			return Route{}, fmt.Errorf("Exception|404:%s not found", name)
 		}
+		f := append([]string{"scripts", "__yao_service"}, fields[1:]...)
+		route.Group = "scripts"
+		route.Handler = "scripts"
+		route.ID = strings.ToLower(strings.Join(f[1:len(f)-1], "."))
+		route.Method = f[len(f)-1]
 
-		// add scripts to the beginning of the fields
-		fields = append([]string{"scripts"}, fields...)
-		fields[1] = "__yao_service"
-		process.Group = "scripts"
-
-		// services.foo.Bar
-		process.Handler = strings.ToLower(process.Group)
-		process.ID = strings.ToLower(strings.ToLower(strings.Join(fields[1:len(fields)-1], ".")))
-		process.Method = fields[len(fields)-1]
-		break
-
-	// The assistants scripts under the assistants directory
 	case "agents", "assistants", "ai":
 		if len(fields) < 3 {
-			return fmt.Errorf("Exception|404:%s not found", process.Name)
+			return Route{}, fmt.Errorf("Exception|404:%s not found", name)
 		}
+		f := append([]string{"scripts", "assistants"}, fields[1:]...)
+		route.Group = "scripts"
+		route.Handler = "scripts"
+		route.ID = strings.ToLower(strings.Join(f[1:len(f)-1], "."))
+		route.Method = f[len(f)-1]
 
-		// add scripts to the beginning of the fields
-		fields = append([]string{"scripts"}, fields...)
-		process.Group = "scripts"
-		fields[1] = "assistants"
-
-		// agents.foo.Bar
-		process.Handler = strings.ToLower(process.Group)
-		process.ID = strings.ToLower(strings.ToLower(strings.Join(fields[1:len(fields)-1], ".")))
-		process.Method = fields[len(fields)-1]
-
-	// the scripts under the scripts directory, or plugins under the plugins directory
 	case "scripts", "studio", "plugins":
 		if len(fields) < 3 {
-			return fmt.Errorf("Exception|404:%s not found", process.Name)
+			return Route{}, fmt.Errorf("Exception|404:%s not found", name)
 		}
-		// scripts.runtime.basic.Hello
-		process.Handler = strings.ToLower(process.Group)
-		process.ID = strings.ToLower(strings.ToLower(strings.Join(fields[1:len(fields)-1], ".")))
-		process.Method = fields[len(fields)-1]
-		break
+		route.Handler = strings.ToLower(route.Group)
+		route.ID = strings.ToLower(strings.Join(fields[1:len(fields)-1], "."))
+		route.Method = fields[len(fields)-1]
 
 	case "session", "http":
-		process.Method = fields[len(fields)-1]
-		process.Handler = strings.ToLower(fmt.Sprintf("%s.%s", process.Group, process.Method))
-		break
+		route.Method = fields[len(fields)-1]
+		route.Handler = strings.ToLower(fmt.Sprintf("%s.%s", route.Group, route.Method))
 
 	case "widgets":
-		process.Method = fields[len(fields)-1]
-		process.ID = strings.ToLower(strings.Join(fields[1:len(fields)-1], "."))
-		process.Handler = strings.ToLower(fmt.Sprintf("widgets.%s.%s", process.ID, process.Method))
-		break
+		route.Method = fields[len(fields)-1]
+		route.ID = strings.ToLower(strings.Join(fields[1:len(fields)-1], "."))
+		route.Handler = strings.ToLower(fmt.Sprintf("widgets.%s.%s", route.ID, route.Method))
 
 	default:
-		process.Handler = strings.ToLower(process.Name)
-		break
+		route.Handler = strings.ToLower(name)
 	}
 
+	return route, nil
+}
+
+// make parse the process (使用并发安全缓存，消灭高频字符串拆分与拼装)
+func (process *Process) make() error {
+	if cached, ok := routeCache.Load(process.Name); ok {
+		route := cached.(Route)
+		process.Group = route.Group
+		process.Method = route.Method
+		process.ID = route.ID
+		process.Handler = route.Handler
+		return nil
+	}
+
+	route, err := parseRoute(process.Name)
+	if err != nil {
+		return err
+	}
+	routeCache.Store(process.Name, route)
+
+	process.Group = route.Group
+	process.Method = route.Method
+	process.ID = route.ID
+	process.Handler = route.Handler
 	return nil
 }
