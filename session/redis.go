@@ -2,12 +2,13 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	jsoniter "github.com/json-iterator/go"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/yaoapp/kun/any"
 	"github.com/yaoapp/kun/log"
 )
@@ -15,8 +16,8 @@ import (
 // Redis session store
 type Redis struct {
 	timeout time.Duration
-	options *redis.Options
-	rdb     *redis.Client
+	options *goredis.Options
+	rdb     *goredis.Client
 }
 
 // NewRedis create a new redis instance
@@ -25,7 +26,7 @@ func NewRedis(host string, options ...string) (*Redis, error) {
 
 	inst := &Redis{
 		timeout: 5 * time.Second,
-		options: &redis.Options{},
+		options: &goredis.Options{},
 		rdb:     nil,
 	}
 
@@ -51,8 +52,11 @@ func NewRedis(host string, options ...string) (*Redis, error) {
 	}
 
 	inst.options.Addr = fmt.Sprintf("%s:%d", host, port)
+	inst.options.DialTimeout = inst.timeout
+	inst.options.ReadTimeout = inst.timeout
+	inst.options.WriteTimeout = inst.timeout
 
-	client := redis.NewClient(inst.options).WithTimeout(inst.timeout)
+	client := goredis.NewClient(inst.options)
 	pingCtx, pingCancel := inst.opContext()
 	defer pingCancel()
 	_, err := client.Ping(pingCtx).Result()
@@ -142,7 +146,7 @@ func (redis *Redis) GetWithContext(parentCtx context.Context, id string, key str
 	}
 
 	// 若并非不存在（例如网络或连接错误），直接返回错误
-	if err != nil && err.Error() != "redis: nil" && !strings.Contains(err.Error(), "redis: nil") {
+	if err != nil && !errors.Is(err, goredis.Nil) {
 		log.Error("Session redis HGet: %s field: %s ERROR:%s", hkey, key, err.Error())
 		return nil, err
 	}
@@ -151,7 +155,7 @@ func (redis *Redis) GetWithContext(parentCtx context.Context, id string, key str
 	skey := fmt.Sprintf("yao:session:%s:%s", id, key)
 	oldVal, oldErr := redis.rdb.Get(ctx, skey).Result()
 	if oldErr != nil {
-		if oldErr.Error() == "redis: nil" || strings.Contains(oldErr.Error(), "redis: nil") {
+		if errors.Is(oldErr, goredis.Nil) {
 			return nil, nil // 两者都未命中
 		}
 		log.Error("Session redis fallback Get: %s ERROR:%s", skey, oldErr.Error())

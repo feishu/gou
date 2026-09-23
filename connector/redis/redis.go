@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 	"github.com/yaoapp/gou/application"
 	"github.com/yaoapp/gou/connector/base"
 	"github.com/yaoapp/gou/helper"
@@ -95,9 +95,13 @@ func (r *Connector) makeConnection() error {
 		return fmt.Errorf("options.host is required")
 	}
 
+	timeout := time.Duration(r.Options.Timeout) * time.Second
 	options := &redis.Options{
-		Addr: fmt.Sprintf("%s:%s", r.Options.Host, r.Options.Port),
-		DB:   any.Of(r.Options.DB).CInt(),
+		Addr:         fmt.Sprintf("%s:%s", r.Options.Host, r.Options.Port),
+		DB:           any.Of(r.Options.DB).CInt(),
+		DialTimeout:  timeout,
+		ReadTimeout:  timeout,
+		WriteTimeout: timeout,
 	}
 
 	if r.Options.User != "" {
@@ -108,8 +112,11 @@ func (r *Connector) makeConnection() error {
 		options.Password = r.Options.Pass
 	}
 
-	client := redis.NewClient(options).WithTimeout(time.Duration(r.Options.Timeout) * time.Second)
-	_, err := client.Ping(context.Background()).Result()
+	client := redis.NewClient(options)
+	pingCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err := client.Ping(pingCtx).Result()
 	if err != nil {
 		return err
 	}

@@ -1,8 +1,6 @@
 module github.com/yaoapp/gou
 
-go 1.25.0
-
-toolchain go1.25.5
+go 1.26.0
 
 require (
 	github.com/blang/semver/v4 v4.0.0 // indirect
@@ -11,13 +9,13 @@ require (
 	github.com/gabriel-vasile/mimetype v1.4.9
 	github.com/gin-gonic/gin v1.10.1
 	github.com/go-errors/errors v1.5.1
-	github.com/go-redis/redis/v8 v8.11.5
 	github.com/gorilla/websocket v1.5.3
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.6.3
 	github.com/hashicorp/golang-lru v1.0.2
 	github.com/json-iterator/go v1.1.12
 	github.com/miekg/dns v1.1.66
+	github.com/redis/go-redis/v9 v9.17.2
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.11.1
 	github.com/tidwall/buntdb v1.3.2
