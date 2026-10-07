@@ -8,6 +8,7 @@ import (
 	nethttp "net/http"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	jsoniter "github.com/json-iterator/go"
@@ -175,6 +176,7 @@ func (path Path) streamHandler(getArgs argsHandler) func(c *gin.Context) {
 		ctx, cancel := context.WithCancel(c.Request.Context())
 		defer cancel()
 
+		done := make(chan struct{})
 		wg := &sync.WaitGroup{}
 		wg.Add(1)
 		go func() {
@@ -182,6 +184,7 @@ func (path Path) streamHandler(getArgs argsHandler) func(c *gin.Context) {
 				wg.Done()
 				close(chanStream)
 				close(chanError)
+				close(done)
 			}()
 
 			path.runStreamScript(ctx, c, getArgs,
@@ -211,13 +214,19 @@ func (path Path) streamHandler(getArgs argsHandler) func(c *gin.Context) {
 		c.Stream(func(w io.Writer) bool {
 
 			select {
-			case err := <-chanError:
+			case err, ok := <-chanError:
+				if !ok {
+					return false
+				}
 				if err != nil {
 					log.Error("[Stream] %s Error: %v", path.Path, err)
 				}
 				return false
 
-			case msg := <-chanStream:
+			case msg, ok := <-chanStream:
+				if !ok {
+					return false
+				}
 				log.Trace("[Stream] %s %s %s %v", path.Path, path.Process, msg.Name, msg.Message)
 				c.SSEvent(msg.Name, msg.Message)
 				return true
@@ -231,7 +240,15 @@ func (path Path) streamHandler(getArgs argsHandler) func(c *gin.Context) {
 			}
 		})
 
-		wg.Wait()
+		// 客户端主动断开或读循环结束，立刻通知后台协程退出
+		cancel()
+
+		// 带超时安全等待，避免后台脚本阻塞导致 Handler 协程永久挂起
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			log.Warn("[Stream] %s: timeout waiting for script goroutine to complete", path.Path)
+		}
 	}
 }
 
@@ -271,7 +288,13 @@ func (path Path) runStreamScript(ctx context.Context, c *gin.Context, getArgs ar
 		onError(err)
 		return
 	}
-	defer v8ctx.Close()
+	defer func() {
+		if g := v8ctx.Global(); g != nil {
+			_ = g.Delete("ssEvent")
+			_ = g.Delete("cancel")
+		}
+		v8ctx.Close()
+	}()
 
 	v8ctx.WithFunction("ssEvent", func(info *v8go.FunctionCallbackInfo) *v8go.Value {
 		args := info.Args()

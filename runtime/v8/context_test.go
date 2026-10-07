@@ -191,6 +191,78 @@ function Run() {
 	}
 }
 
+func TestRunnerResetCleansGlobalSSEventAndCancel(t *testing.T) {
+	option := option()
+	option.Mode = "standard"
+	option.MinSize = 1
+	option.MaxSize = 1
+	option.HeapSizeLimit = 4294967296
+
+	prepareSetup(t, option)
+	defer cleanupDispatcherForTest(t)
+
+	script1 := &Script{
+		ID:   "clean-function-test-1",
+		File: "clean-function-test-1.js",
+		Source: `
+function Run() {
+	ssEvent("message", "hello")
+	cancel()
+	return true
+}
+`,
+	}
+
+	v8ctx1, err := script1.NewContext("", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v8ctx1.WithFunction("ssEvent", func(info *v8go.FunctionCallbackInfo) *v8go.Value {
+		return v8go.Null(info.Context().Isolate())
+	})
+	v8ctx1.WithFunction("cancel", func(info *v8go.FunctionCallbackInfo) *v8go.Value {
+		return v8go.Null(info.Context().Isolate())
+	})
+
+	res, err := v8ctx1.Call("Run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res != true {
+		t.Fatalf("expected true result, got %#v", res)
+	}
+
+	err = v8ctx1.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	script2 := &Script{
+		ID:   "clean-function-test-2",
+		File: "clean-function-test-2.js",
+		Source: `
+function Run() {
+	return typeof ssEvent === "undefined" && typeof cancel === "undefined"
+}
+`,
+	}
+
+	v8ctx2, err := script2.NewContext("", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v8ctx2.Close()
+
+	res2, err := v8ctx2.Call("Run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2 != true {
+		t.Fatalf("expected ssEvent and cancel to be cleaned up, got %#v", res2)
+	}
+}
+
 func TestCallWithPerformanceTimeoutDestroysRunner(t *testing.T) {
 	option := option()
 	option.Mode = "performance"

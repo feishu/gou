@@ -533,6 +533,8 @@ func (runner *Runner) reset() bool {
 		global := ctx.Global()
 		if global != nil {
 			_ = global.Delete("__yao_data")
+			_ = global.Delete("ssEvent")
+			_ = global.Delete("cancel")
 		}
 		ctx.ResetRetainedValues()
 	}
