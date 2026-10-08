@@ -279,9 +279,85 @@ func JsValue(ctx *v8go.Context, value interface{}) (*v8go.Value, error) {
 	case io.Writer, io.Reader, io.ReadCloser, io.WriteCloser, gin.ResponseWriter:
 		return v8go.NewExternal(ctx.Isolate(), v)
 
+	case map[string]interface{}:
+		if len(v) <= 8 {
+			if jsVal, ok, err := jsMapSmallFast(ctx, v); ok {
+				return jsVal, err
+			}
+		}
+		return jsValueParse(ctx, v)
+
 	default:
 		return jsValueParse(ctx, v)
 	}
+}
+
+func jsMapSmallFast(ctx *v8go.Context, m map[string]interface{}) (*v8go.Value, bool, error) {
+	tmpl := v8go.NewObjectTemplate(ctx.Isolate())
+	for k, raw := range m {
+		if raw == nil {
+			if err := tmpl.Set(k, v8go.Null(ctx.Isolate())); err != nil {
+				return nil, true, err
+			}
+			continue
+		}
+		switch val := raw.(type) {
+		case string, int32, uint32, int64, uint64, float64, bool, *big.Int:
+			if err := tmpl.Set(k, val); err != nil {
+				return nil, true, err
+			}
+		case int:
+			int64v := int64(val)
+			if int64v >= minSafeInteger && int64v <= maxSafeInteger {
+				if err := tmpl.Set(k, float64(int64v)); err != nil {
+					return nil, true, err
+				}
+			} else {
+				if err := tmpl.Set(k, int64v); err != nil {
+					return nil, true, err
+				}
+			}
+		case uint:
+			uint64v := uint64(val)
+			if uint64v <= uint64(maxSafeInteger) {
+				if err := tmpl.Set(k, float64(uint64v)); err != nil {
+					return nil, true, err
+				}
+			} else {
+				if err := tmpl.Set(k, uint64v); err != nil {
+					return nil, true, err
+				}
+			}
+		case int8:
+			if err := tmpl.Set(k, int32(val)); err != nil {
+				return nil, true, err
+			}
+		case int16:
+			if err := tmpl.Set(k, int32(val)); err != nil {
+				return nil, true, err
+			}
+		case uint8:
+			if err := tmpl.Set(k, uint32(val)); err != nil {
+				return nil, true, err
+			}
+		case uint16:
+			if err := tmpl.Set(k, uint32(val)); err != nil {
+				return nil, true, err
+			}
+		case float32:
+			if err := tmpl.Set(k, float64(val)); err != nil {
+				return nil, true, err
+			}
+		default:
+			return nil, false, nil
+		}
+	}
+
+	obj, err := tmpl.NewInstance(ctx)
+	if err != nil {
+		return nil, true, err
+	}
+	return obj.Value, true, nil
 }
 
 func jsValueParse(ctx *v8go.Context, value interface{}) (*v8go.Value, error) {
@@ -422,7 +498,6 @@ func goValueParse(value *v8go.Value, v interface{}) (interface{}, error) {
 	ptr := &v
 	err = jsoniter.Unmarshal(data, ptr)
 	if err != nil {
-		fmt.Printf("---\n%s\n---\n", data)
 		return nil, err
 	}
 

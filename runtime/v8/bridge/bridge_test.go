@@ -270,3 +270,69 @@ func BenchmarkBridgeDirect_1MB(b *testing.B) {
 	}
 }
 
+func TestJsValueSmallMapFastPath(t *testing.T) {
+	iso := v8go.NewIsolate()
+	defer iso.Dispose()
+
+	ctx := v8go.NewContext(iso)
+	defer ctx.Close()
+
+	// 1. Small map with scalar values
+	input := map[string]interface{}{
+		"id":     int(1001),
+		"name":   "YaoEngine",
+		"active": true,
+		"score":  float64(99.5),
+	}
+
+	val, err := JsValue(ctx, input)
+	if err != nil {
+		t.Fatalf("unexpected error converting small map: %v", err)
+	}
+	if !val.IsObject() {
+		t.Fatalf("expected JS Object, got value: %v", val)
+	}
+
+	ctx.Global().Set("testObj", val)
+	checkRes, err := ctx.RunScript("testObj.id === 1001 && testObj.name === 'YaoEngine' && testObj.active === true && testObj.score === 99.5", "test.js")
+	if err != nil {
+		t.Fatalf("run script failed: %v", err)
+	}
+	if !checkRes.Boolean() {
+		t.Fatalf("JS failed to read small map properties accurately")
+	}
+
+	// 2. Round trip back to GoValue
+	goVal, err := GoValue(val, ctx)
+	if err != nil {
+		t.Fatalf("GoValue failed: %v", err)
+	}
+	resMap, ok := goVal.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map[string]interface{}, got %T", goVal)
+	}
+	if resMap["name"] != "YaoEngine" || fmt.Sprintf("%v", resMap["id"]) != "1001" || resMap["active"] != true {
+		t.Fatalf("roundtrip map content mismatch: %#v", resMap)
+	}
+
+	// 3. Nested map fallback
+	nested := map[string]interface{}{
+		"info": map[string]interface{}{
+			"foo": "bar",
+		},
+	}
+	valNested, err := JsValue(ctx, nested)
+	if err != nil {
+		t.Fatalf("unexpected error converting nested map: %v", err)
+	}
+	ctx.Global().Set("testNested", valNested)
+	checkNested, err := ctx.RunScript("testNested.info.foo === 'bar'", "nested.js")
+	if err != nil {
+		t.Fatalf("run script on nested map failed: %v", err)
+	}
+	if !checkNested.Boolean() {
+		t.Fatalf("nested map read failed")
+	}
+}
+
+

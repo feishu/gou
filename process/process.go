@@ -38,6 +38,37 @@ func AcquireProcess(ctx context.Context, name string, args ...interface{}) (*Pro
 	return p, nil
 }
 
+// Invocation process 调用参数载体
+type Invocation struct {
+	Name   string
+	Args   []interface{}
+	SID    string
+	Global map[string]interface{}
+}
+
+// Dispatch 统一闭环调度执行入口 (自动管理 sync.Pool 实例复用、参数注入与安全释放)
+func Dispatch(ctx context.Context, inv Invocation) (interface{}, error) {
+	p, err := AcquireProcess(ctx, inv.Name, inv.Args...)
+	if err != nil {
+		return nil, err
+	}
+	defer p.Release()
+
+	if inv.SID != "" {
+		p.WithSID(inv.SID)
+	}
+
+	if inv.Global != nil {
+		p.WithGlobal(inv.Global)
+	}
+
+	if err := p.Execute(); err != nil {
+		return nil, err
+	}
+
+	return p.Value(), nil
+}
+
 // New make a new process
 func New(name string, args ...interface{}) *Process {
 	process, err := Of(name, args...)
@@ -129,11 +160,7 @@ func (process *Process) Reset() {
 	process.Callback = nil
 	process._val = nil
 	process.Args = process.Args[:0]
-	if process.Global != nil {
-		for k := range process.Global {
-			delete(process.Global, k)
-		}
-	}
+	process.Global = nil
 }
 
 // Release the value of the process, and return to pool if fromPool is true

@@ -327,32 +327,29 @@ func (path Path) runStreamScript(ctx context.Context, c *gin.Context, getArgs ar
 
 func (path Path) executeProcess(ctx context.Context, c *gin.Context, getArgs argsHandler) (interface{}, error) {
 	var args []interface{} = getArgs(c)
-	p, err := process.Of(path.Process, args...)
-	if err != nil {
-		log.Error("[Path] %s %s", path.Path, err.Error())
-		return nil, err
+	inv := process.Invocation{
+		Name: path.Process,
+		Args: args,
 	}
-	defer p.Dispose()
 
 	if sid, has := c.Get("__sid"); has { // 设定会话ID
-		if sid, ok := sid.(string); ok {
-			p.WithSID(sid)
+		if sidStr, ok := sid.(string); ok {
+			inv.SID = sidStr
 		}
 	}
 
 	if global, has := c.Get("__global"); has { // 设定全局变量
-		if global, ok := global.(map[string]interface{}); ok {
-			p.WithGlobal(global)
+		if globalMap, ok := global.(map[string]interface{}); ok {
+			inv.Global = globalMap
 		}
 	}
 
-	p.WithContext(ctx)
-	err = p.Execute()
+	val, err := process.Dispatch(ctx, inv)
 	if err != nil {
 		log.Error("[Path] %s %s", path.Path, err.Error())
 		return nil, err
 	}
-	return p.Value(), nil
+	return val, nil
 }
 
 func (path Path) execProcess(ctx context.Context, chRes chan<- interface{}, c *gin.Context, getArgs argsHandler) {

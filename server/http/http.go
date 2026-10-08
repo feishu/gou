@@ -156,7 +156,7 @@ func (server *Server) Start() error {
 	go func() {
 		server.status = READY
 		server.event <- READY
-		if errSrv := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+		if errSrv := srv.Serve(listener); errSrv != nil && errSrv != http.ErrServerClosed {
 			err = errSrv
 			log.Error("[Server] %s %s", srv.Addr, errSrv.Error())
 			server.signal <- ERROR

@@ -532,3 +532,64 @@ func BenchmarkProcessAcquireExecute(b *testing.B) {
 	}
 }
 
+func TestDispatch(t *testing.T) {
+	Register("test.dispatch.echo", func(p *Process) interface{} {
+		return map[string]interface{}{
+			"arg":    p.Args[0],
+			"sid":    p.Sid,
+			"global": p.Global,
+		}
+	})
+
+	ctx := context.Background()
+	inv := Invocation{
+		Name:   "test.dispatch.echo",
+		Args:   []interface{}{"dispatch-val"},
+		SID:    "sid-999",
+		Global: map[string]interface{}{"k1": "v1"},
+	}
+
+	val, err := Dispatch(ctx, inv)
+	assert.NoError(t, err)
+	res, ok := val.(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, "dispatch-val", res["arg"])
+	assert.Equal(t, "sid-999", res["sid"])
+	assert.Equal(t, map[string]interface{}{"k1": "v1"}, res["global"])
+
+	// Test context cancellation
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = Dispatch(canceledCtx, inv)
+	assert.Error(t, err)
+	assert.Equal(t, context.Canceled, err)
+}
+
+func TestDispatchConcurrent(t *testing.T) {
+	Register("test.dispatch.concurrent", func(p *Process) interface{} {
+		time.Sleep(1 * time.Millisecond)
+		return p.Args[0]
+	})
+
+	var wg sync.WaitGroup
+	workers := 50
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			ctx := context.Background()
+			expected := fmt.Sprintf("val-%d", idx)
+			inv := Invocation{
+				Name: "test.dispatch.concurrent",
+				Args: []interface{}{expected},
+				SID:  fmt.Sprintf("sid-%d", idx),
+			}
+			val, err := Dispatch(ctx, inv)
+			assert.NoError(t, err)
+			assert.Equal(t, expected, val)
+		}(i)
+	}
+	wg.Wait()
+}
+
+
