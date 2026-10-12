@@ -713,12 +713,20 @@ func (script *Script) execPool(process *process.Process) interface{} {
 	})
 }
 
-// ContextTimeout get the context timeout
+// ContextTimeout 获取脚本运行时的上下文超时时长 (Context Lifetime Deadline)
+// 生产级决策阶梯：
+// 1. 若全局配置了运行期上下文超时 (YAO_RUNTIME_CONTEXT_TIMEOUT / runtimeOption.ContextTimeout > 0)，
+//    以全局环境变量为第一权威基准线，确保生产环境运维配置具备决定权；
+// 2. 否则若脚本对象自身定义了合法超时 (script.Timeout > 0)，采用脚本自身设定；
+// 3. 兜底返回 0 (无超时限制)。
 func (script *Script) ContextTimeout() time.Duration {
-	if script.Timeout > 0 {
+	if runtimeOption.ContextTimeout > 0 {
+		return time.Duration(runtimeOption.ContextTimeout) * time.Millisecond
+	}
+	if script != nil && script.Timeout > 0 {
 		return script.Timeout
 	}
-	return time.Duration(runtimeOption.ContextTimeout) * time.Millisecond
+	return 0
 }
 
 // Prewarm 并发预热编译所有已加载脚本并生成全局 CodeCache，消除冷启动编译开销
