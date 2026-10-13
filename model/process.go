@@ -195,7 +195,8 @@ func processFind(process *process.Process) interface{} {
 	if process.Context != nil {
 		params.Context = process.Context
 	}
-	return mod.MustFind(process.Args[0], params)
+	res := mod.MustFind(process.Args[0], params)
+	return afterQueryDecrypt(process.ID, res)
 }
 
 // processGet 运行模型 MustGet
@@ -209,7 +210,8 @@ func processGet(process *process.Process) interface{} {
 	if process.Context != nil {
 		params.Context = process.Context
 	}
-	return mod.MustGet(params)
+	res := mod.MustGet(params)
+	return afterQueryDecrypt(process.ID, res)
 }
 
 // processPaginate 运行模型 MustPaginate
@@ -226,7 +228,8 @@ func processPaginate(process *process.Process) interface{} {
 
 	page := any.Of(process.Args[1]).CInt()
 	pagesize := any.Of(process.Args[2]).CInt()
-	return mod.MustPaginate(params, page, pagesize)
+	res := mod.MustPaginate(params, page, pagesize)
+	return afterQueryDecrypt(process.ID, res)
 }
 
 // processCount 运行模型 MustCount
@@ -248,6 +251,7 @@ func processCreate(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	mod := Select(process.ID)
 	row := any.Of(process.Args[0]).Map().MapStrAny
+	row = beforePersistEncrypt(process.ID, row)
 	return mod.MustCreate(row, process.Context)
 }
 
@@ -257,6 +261,7 @@ func processUpdate(process *process.Process) interface{} {
 	mod := Select(process.ID)
 	id := process.Args[0]
 	row := any.Of(process.Args[1]).Map().MapStrAny
+	row = beforePersistEncrypt(process.ID, row)
 	mod.MustUpdate(id, row, process.Context)
 	return nil
 }
@@ -266,6 +271,7 @@ func processSave(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	mod := Select(process.ID)
 	row := any.Of(process.Args[0]).Map().MapStrAny
+	row = beforePersistEncrypt(process.ID, row)
 	return mod.MustSave(row, process.Context)
 }
 
@@ -318,6 +324,7 @@ func processInsert(process *process.Process) interface{} {
 		}
 	}
 
+	colums, rows = beforeInsertEncrypt(process.ID, colums, rows)
 	mod.MustInsert(colums, rows, process.Context)
 	return nil
 }
@@ -334,6 +341,7 @@ func processUpdateWhere(process *process.Process) interface{} {
 		params.Context = process.Context
 	}
 	row := any.Of(process.Args[1]).Map().MapStrAny
+	row = beforePersistEncrypt(process.ID, row)
 	return mod.MustUpdateWhere(params, row)
 }
 

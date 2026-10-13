@@ -3,6 +3,7 @@ package query
 import (
 	"fmt"
 
+	"github.com/yaoapp/gou/crypto"
 	"github.com/yaoapp/gou/query"
 	"github.com/yaoapp/gou/query/share"
 	"github.com/yaoapp/gou/runtime/v8/bridge"
@@ -155,6 +156,9 @@ func (obj *Object) runQueryGet(iso *v8go.Isolate, info *v8go.FunctionCallbackInf
 		return nil, err
 	}
 	data = dsl.Get(input)
+	if crypto.IsEngineCryptoEnabled() {
+		data = crypto.SniffAndDecrypt(data)
+	}
 	return obj.response(iso, info, data), err
 }
 
@@ -167,6 +171,9 @@ func (obj *Object) runQueryPaginate(iso *v8go.Isolate, info *v8go.FunctionCallba
 		return nil, err
 	}
 	data = dsl.Paginate(input)
+	if crypto.IsEngineCryptoEnabled() {
+		data = crypto.SniffAndDecrypt(data)
+	}
 	return obj.response(iso, info, data), err
 }
 
@@ -179,6 +186,9 @@ func (obj *Object) runQueryFirst(iso *v8go.Isolate, info *v8go.FunctionCallbackI
 		return nil, err
 	}
 	data = dsl.First(input)
+	if crypto.IsEngineCryptoEnabled() {
+		data = crypto.SniffAndDecrypt(data)
+	}
 	return obj.response(iso, info, data), err
 }
 
@@ -191,6 +201,9 @@ func (obj *Object) runQueryRun(iso *v8go.Isolate, info *v8go.FunctionCallbackInf
 		return nil, err
 	}
 	data = dsl.Run(input)
+	if crypto.IsEngineCryptoEnabled() {
+		data = crypto.SniffAndDecrypt(data)
+	}
 	return obj.response(iso, info, data), err
 }
 
