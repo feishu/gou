@@ -4,14 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 
 	"github.com/yaoapp/gou/application"
 	"github.com/yaoapp/gou/process"
-	"github.com/yaoapp/gou/query/share"
-	"github.com/yaoapp/kun/maps"
 )
 
 // FieldPolicyRule 单字段加密策略规则
@@ -231,42 +228,6 @@ func IsWhiteListed(tableOrModel string) bool {
 	return false
 }
 
-// IsEngineCryptoEnabled 全局无缝降级开关
-// 优先级: YAO_ENGINE_CRYPTO 环境变量 (off/false/0 严格关闭; on/true/1 开启)
-func IsEngineCryptoEnabled() bool {
-	env := strings.ToLower(strings.TrimSpace(os.Getenv("YAO_ENGINE_CRYPTO")))
-	if env == "off" || env == "false" || env == "0" || env == "no" {
-		return false
-	}
-	if env == "on" || env == "true" || env == "1" || env == "yes" {
-		return true
-	}
-	// 兼容 CRYPTO_ENABLED 环境变量
-	serviceCryptoEnv := strings.ToLower(strings.TrimSpace(os.Getenv("CRYPTO_ENABLED")))
-	if serviceCryptoEnv == "off" || serviceCryptoEnv == "false" || serviceCryptoEnv == "0" {
-		return false
-	}
-	return true
-}
-
-// GetCryptoConfig 获取当前引擎使用的加解密 Key, IV, Kid
-// 严格杜绝任何业务特定项目名称硬编码
-func GetCryptoConfig() (key, iv []byte, kid string) {
-	k := os.Getenv("LOCAL_CRYPTO_KEY")
-	if len(k) != 16 {
-		k = "0123456789abcdef" // 16 字节通用默认回退 Key
-	}
-	v := os.Getenv("LOCAL_CRYPTO_IV")
-	if len(v) != 16 {
-		v = "fedcba9876543210" // 16 字节通用默认回退 IV
-	}
-	kd := os.Getenv("LOCAL_CRYPTO_KID")
-	if kd == "" {
-		kd = "default-sm4-1"
-	}
-	return []byte(k), []byte(v), kd
-}
-
 // LoadEnginePolicyJSON 暴露包级方法加载策略
 func LoadEnginePolicyJSON(data []byte) error {
 	return globalPolicy.LoadPolicyJSON(data)
@@ -300,167 +261,6 @@ func RegisterEngineModelTable(modelID, table string) {
 // ResetEnginePolicy 重置策略缓存（供测试隔离使用）
 func ResetEnginePolicy() {
 	globalPolicy.Reset()
-}
-
-// EncryptMap 对 Map 按照表策略执行加密转换
-func EncryptMap(tableOrModel string, row map[string]interface{}) map[string]interface{} {
-	if !IsEngineCryptoEnabled() || IsWhiteListed(tableOrModel) || row == nil {
-		return row
-	}
-	key, iv, kid := GetCryptoConfig()
-	for col, val := range row {
-		if val == nil {
-			continue
-		}
-		rule, has := globalPolicy.GetFieldRule(tableOrModel, col)
-		if !has {
-			continue
-		}
-		strVal, isStr := val.(string)
-		if !isStr || strVal == "" || IsEnvelope(strVal) {
-			continue
-		}
-		if rule.Op == "encrypt" {
-			cipherB64, err := SM4CBCEncrypt([]byte(strVal), key, iv)
-			if err == nil {
-				row[col] = EncodeEnvelope("SM4/CBC/PKCS7", kid, cipherB64)
-			}
-		} else if rule.Op == "hash" {
-			hashVal := HmacSM3Hex(key, []byte(strVal))
-			row[col] = EncodeEnvelope("HMAC-SM3", kid, hashVal)
-		}
-	}
-	return row
-}
-
-// DecryptMap 对 Map 包含的密文封套执行解密转换
-func DecryptMap(tableOrModel string, row map[string]interface{}) map[string]interface{} {
-	if !IsEngineCryptoEnabled() || row == nil {
-		return row
-	}
-	key, iv, _ := GetCryptoConfig()
-	for col, val := range row {
-		strVal, ok := val.(string)
-		if !ok || !IsEnvelope(strVal) {
-			continue
-		}
-		plain, err := DecryptEnvelope(strVal, key, iv)
-		if err == nil {
-			row[col] = plain
-		}
-	}
-	return row
-}
-
-// SniffAndDecrypt 递归嗅探并解密任意数据结构中的国密封套密文
-func SniffAndDecrypt(val interface{}) interface{} {
-	if !IsEngineCryptoEnabled() || val == nil {
-		return val
-	}
-	key, iv, _ := GetCryptoConfig()
-
-	switch v := val.(type) {
-	case string:
-		if IsEnvelope(v) {
-			plain, err := DecryptEnvelope(v, key, iv)
-			if err == nil {
-				return plain
-			}
-		}
-		return v
-
-	case maps.MapStrAny:
-		for k, item := range v {
-			v[k] = SniffAndDecrypt(item)
-		}
-		return v
-
-	case share.Record:
-		for k, item := range v {
-			v[k] = SniffAndDecrypt(item)
-		}
-		return v
-
-	case []maps.MapStrAny:
-		for i := range v {
-			for k, item := range v[i] {
-				v[i][k] = SniffAndDecrypt(item)
-			}
-		}
-		return v
-
-	case []share.Record:
-		for i := range v {
-			for k, item := range v[i] {
-				v[i][k] = SniffAndDecrypt(item)
-			}
-		}
-		return v
-
-	case share.Paginate:
-		for i := range v.Items {
-			for k, item := range v.Items[i] {
-				v.Items[i][k] = SniffAndDecrypt(item)
-			}
-		}
-		return v
-
-	case *share.Paginate:
-		if v != nil {
-			for i := range v.Items {
-				for k, item := range v.Items[i] {
-					v.Items[i][k] = SniffAndDecrypt(item)
-				}
-			}
-		}
-		return v
-
-	case map[string]interface{}:
-		for k, item := range v {
-			v[k] = SniffAndDecrypt(item)
-		}
-		return v
-
-	case []map[string]interface{}:
-		for i := range v {
-			for k, item := range v[i] {
-				v[i][k] = SniffAndDecrypt(item)
-			}
-		}
-		return v
-
-	case []interface{}:
-		for i, item := range v {
-			v[i] = SniffAndDecrypt(item)
-		}
-		return v
-
-	default:
-		// 通用反射兜底（覆盖 xun/ORM 返回的自定义 map/slice 结构）
-		rv := reflect.ValueOf(val)
-		if rv.Kind() == reflect.Map {
-			for _, key := range rv.MapKeys() {
-				elem := rv.MapIndex(key)
-				if elem.CanInterface() {
-					decrypted := SniffAndDecrypt(elem.Interface())
-					rv.SetMapIndex(key, reflect.ValueOf(decrypted))
-				}
-			}
-			return val
-		} else if rv.Kind() == reflect.Slice {
-			for i := 0; i < rv.Len(); i++ {
-				elem := rv.Index(i)
-				if elem.CanInterface() {
-					decrypted := SniffAndDecrypt(elem.Interface())
-					if elem.CanSet() {
-						elem.Set(reflect.ValueOf(decrypted))
-					}
-				}
-			}
-			return val
-		}
-		return val
-	}
 }
 
 // -------------------------------------------------------------

@@ -42,6 +42,9 @@ const (
 
 	// SCRIPT ? the script connector ( difference with widget ?)
 	SCRIPT
+
+	// CONFIG the general config connector (type: config)
+	CONFIG
 )
 
 var types = map[string]int{
@@ -60,6 +63,7 @@ var types = map[string]int{
 	"script":        SCRIPT, // ?
 	"moapi":         MOAPI,
 	"fastembed":     FASTEMBED,
+	"config":        CONFIG,
 }
 
 // 导出底层基础能力接口与错误哨兵，保持 100% 透明兼容

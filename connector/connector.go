@@ -12,6 +12,7 @@ import (
 	mongo "github.com/yaoapp/gou/connector/mongo"
 	"github.com/yaoapp/gou/connector/openai"
 	"github.com/yaoapp/gou/connector/redis"
+	"github.com/yaoapp/gou/connector/config"
 )
 
 // Connectors the loaded connectors
@@ -203,6 +204,10 @@ func makeConnector(typ string) (Connector, error) {
 
 	case FASTEMBED:
 		c := &fastembed.Connector{}
+		return c, nil
+
+	case CONFIG:
+		c := &config.Connector{}
 		return c, nil
 	}
 

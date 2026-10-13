@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/yaoapp/gou/connector"
 	"github.com/yaoapp/gou/crypto"
 	"github.com/yaoapp/gou/query"
 	"github.com/yaoapp/gou/query/gou"
@@ -67,6 +68,23 @@ func initCryptoTestDB(t *testing.T) {
 func TestQueryCrypto_ABTesting(t *testing.T) {
 	oldEngineCrypto := os.Getenv("YAO_ENGINE_CRYPTO")
 	defer os.Setenv("YAO_ENGINE_CRYPTO", oldEngineCrypto)
+
+	// 规范注册 local 测试连接器 (配置驱动，绝不依赖底座代码硬编码兜底)
+	connDSL := []byte(`{
+		"name": "Local Test Connector",
+		"type": "config",
+		"options": {
+			"params": {
+				"key": "0123456789abcdef",
+				"iv":  "fedcba9876543210",
+				"kid": "test-sm4-1"
+			}
+		}
+	}`)
+	_, _ = connector.New("config", "local", connDSL)
+	defer connector.Remove("local")
+	crypto.ResetProviderManager()
+	defer crypto.ResetProviderManager()
 
 	initCryptoTestDB(t)
 	defer func() {

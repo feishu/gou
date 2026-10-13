@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/yaoapp/gou/connector"
 	"github.com/yaoapp/gou/crypto"
 	"github.com/yaoapp/gou/process"
 	kunAny "github.com/yaoapp/kun/any"
@@ -29,6 +30,23 @@ func TestModelCryptoHooks_ABTesting(t *testing.T) {
 	crypto.RegisterEngineField(crypto.FieldPolicyRule{Table: "sys_patients", Column: "patient_name", Op: "encrypt", Alg: "SM4/CBC/PKCS7"})
 	crypto.RegisterEngineField(crypto.FieldPolicyRule{Table: "sys_user_auths", Column: "password", Op: "hash", Alg: "HMAC-SM3"})
 	crypto.RegisterEngineWhitelist("sys_crypto")
+
+	// 规范注册 local 测试连接器 (配置驱动，绝不依赖底座代码硬编码兜底)
+	connDSL := []byte(`{
+		"name": "Local Test Connector",
+		"type": "config",
+		"options": {
+			"params": {
+				"key": "0123456789abcdef",
+				"iv":  "fedcba9876543210",
+				"kid": "test-sm4-1"
+			}
+		}
+	}`)
+	_, _ = connector.New("config", "local", connDSL)
+	defer connector.Remove("local")
+	crypto.ResetProviderManager()
+	defer crypto.ResetProviderManager()
 
 	key, iv, _ := crypto.GetCryptoConfig()
 
