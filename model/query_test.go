@@ -1,5 +1,15 @@
 package model
 
+import (
+	"context"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/yaoapp/xun/capsule"
+)
+
 // func TestQueryWhere(t *testing.T) {
 // 	param := QueryParam{
 // 		Model: "user",
@@ -403,3 +413,105 @@ package model
 // 	res := stack.Paginate(1, 2)
 // 	utils.Dump(res)
 // }
+
+func TestQueryStackWhereInAST(t *testing.T) {
+	dbPath := "./test_query_ast.db"
+	_ = os.Remove(dbPath)
+	defer os.Remove(dbPath)
+
+	manager, err := capsule.Add("primary", "sqlite3", dbPath)
+	if err != nil {
+		t.Skip("sqlite3 not available for query test:", err)
+		return
+	}
+	manager.SetAsGlobal()
+	defer manager.Close()
+
+	mod := &Model{
+		ID: "test_user",
+		MetaData: MetaData{
+			Table: Table{Name: "users"},
+		},
+		PrimaryKey: "id",
+		Columns: map[string]*Column{
+			"id":      {Name: "id", Type: "id"},
+			"dept_id": {Name: "dept_id", Type: "integer"},
+			"status":  {Name: "status", Type: "string"},
+		},
+		ColumnNames: []interface{}{"id", "dept_id", "status"},
+	}
+
+	SetModel(mod.ID, mod)
+
+	param := QueryParam{
+		Model: "test_user",
+		Table: "users",
+		Alias: "users",
+		Select: []interface{}{"id", "dept_id"},
+		Wheres: []QueryWhere{
+			{
+				Method: "wherein",
+				Column: "dept_id",
+				Value:  []int64{101, 102, 103},
+			},
+			{
+				Method: "orwherein",
+				Column: "dept_id",
+				Value:  []int64{201, 202},
+			},
+		},
+	}
+
+	stack := param.NewQuery()
+	assert.NotNil(t, stack)
+	sql := stack.Query().ToSQL()
+	t.Logf("GENERATED SQL: %s", sql)
+
+	assert.True(t, strings.Contains(strings.ToLower(sql), "in (101, 102, 103)") || strings.Contains(strings.ToLower(sql), "in (?,?,?)") || strings.Contains(strings.ToLower(sql), "in (?, ?, ?)"), "SQL should contain where in: "+sql)
+	assert.True(t, strings.Contains(strings.ToLower(sql), "or `users`.`dept_id` in") || strings.Contains(strings.ToLower(sql), "or"), "SQL should contain OR for orwherein: "+sql)
+}
+
+func TestQueryStackTxPropagation(t *testing.T) {
+	dbPath := "./test_query_tx.db"
+	_ = os.Remove(dbPath)
+	defer os.Remove(dbPath)
+
+	manager, err := capsule.Add("primary", "sqlite3", dbPath)
+	if err != nil {
+		t.Skip("sqlite3 not available for tx test:", err)
+		return
+	}
+	manager.SetAsGlobal()
+	defer manager.Close()
+
+	mod := &Model{
+		ID: "test_tx_model",
+		MetaData: MetaData{
+			Table: Table{Name: "users"},
+		},
+		PrimaryKey: "id",
+		Columns: map[string]*Column{
+			"id": {Name: "id", Type: "id"},
+		},
+		ColumnNames: []interface{}{"id"},
+	}
+	SetModel(mod.ID, mod)
+
+	err = Transaction(func(txCtx context.Context) error {
+		param := QueryParam{
+			Model:   "test_tx_model",
+			Table:   "users",
+			Alias:   "users",
+			Context: txCtx,
+			Select:  []interface{}{"id"},
+		}
+
+		stack := param.NewQuery()
+		assert.NotNil(t, stack)
+		qb := stack.Query()
+		assert.NotNil(t, qb)
+		assert.NotNil(t, qb.Tx(), "QueryStack 中的 Query 必须继承事务 Tx")
+		return nil
+	})
+	assert.NoError(t, err)
+}

@@ -44,7 +44,14 @@ func (param QueryParam) Query(stack *QueryStack, stackParams ...QueryStackParam)
 			stackParam = stackParams[0]
 		}
 
-		qb := capsule.Query().Table(param.Table + " as " + param.Alias)
+		var qb query.Query
+		if mod != nil {
+			qb = mod.Query(param.Context)
+		}
+		if qb == nil {
+			qb = capsule.Query()
+		}
+		qb = qb.Table(param.Table + " as " + param.Alias)
 		if param.Context != nil {
 			qb = qb.WithContext(param.Context)
 		}
@@ -354,7 +361,7 @@ func (param QueryParam) Where(where QueryWhere, qb query.Query, mod *Model) {
 
 		// Use the parent's method to determine and/or
 		switch strings.ToLower(where.Method) {
-		case "orwhere":
+		case "orwhere", "orwherein":
 			qb.OrWhere(callback)
 		default:
 			qb.Where(callback)
@@ -416,6 +423,30 @@ func (param QueryParam) Where(where QueryWhere, qb query.Query, mod *Model) {
 			}
 			qb.OrWhere(column, op, where.Value)
 		}
+		break
+	case "wherein":
+		if value, ok := where.Value.(string); ok {
+			where.Value = strings.Split(value, ",")
+		}
+		qb.WhereIn(column, where.Value)
+		break
+	case "orwherein":
+		if value, ok := where.Value.(string); ok {
+			where.Value = strings.Split(value, ",")
+		}
+		qb.OrWhereIn(column, where.Value)
+		break
+	case "wherenotin":
+		if value, ok := where.Value.(string); ok {
+			where.Value = strings.Split(value, ",")
+		}
+		qb.WhereNotIn(column, where.Value)
+		break
+	case "orwherenotin":
+		if value, ok := where.Value.(string); ok {
+			where.Value = strings.Split(value, ",")
+		}
+		qb.OrWhereNotIn(column, where.Value)
 		break
 	}
 }

@@ -44,12 +44,13 @@ var ModelHandlers = map[string]process.Handler{
 	"snapshotexists":          processSnapshotExists,
 
 	// DSL operations
-	"migrate":  processMigrate,
-	"load":     processLoad,
-	"reload":   processReload,
-	"metadata": processGetMetaData,
-	"read":     processRead,
-	"exists":   processExists,
+	"migrate":          processMigrate,
+	"load":             processLoad,
+	"reload":           processReload,
+	"metadata":         processGetMetaData,
+	"read":             processRead,
+	"exists":           processExists,
+	"reloaddatascopes": processReloadDataScopes,
 }
 
 func init() {
@@ -59,14 +60,15 @@ func init() {
 
 	// Model DSL operations
 	process.RegisterGroup("model", map[string]process.Handler{
-		"list":    processList,
-		"read":    processRead,
-		"dsl":     processDSL,
-		"exists":  processModelExists,
-		"reload":  processModelReload,
-		"migrate": processModelMigrate,
-		"load":    processModelLoad,
-		"unload":  processModelUnload,
+		"list":             processList,
+		"read":             processRead,
+		"dsl":              processDSL,
+		"exists":           processModelExists,
+		"reload":           processModelReload,
+		"migrate":          processModelMigrate,
+		"load":             processModelLoad,
+		"unload":           processModelUnload,
+		"reloaddatascopes": processReloadDataScopes,
 	})
 }
 
@@ -184,7 +186,7 @@ func processList(process *process.Process) interface{} {
 	return models
 }
 
-// processFind 运行模型 MustFind
+// processFind 运行模型 MustFind (受行级数据权限 AOP 保护)
 func processFind(process *process.Process) interface{} {
 	process.ValidateArgNums(2)
 	mod := Select(process.ID)
@@ -195,11 +197,14 @@ func processFind(process *process.Process) interface{} {
 	if process.Context != nil {
 		params.Context = process.Context
 	}
+	if err := mod.BeforeQueryDataScope(process.Context, process.Global, &params); err != nil {
+		exception.Err(err, 403).Throw()
+	}
 	res := mod.MustFind(process.Args[0], params)
 	return afterQueryDecrypt(process.ID, res)
 }
 
-// processGet 运行模型 MustGet
+// processGet 运行模型 MustGet (受行级数据权限 AOP 保护)
 func processGet(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	mod := Select(process.ID)
@@ -210,11 +215,14 @@ func processGet(process *process.Process) interface{} {
 	if process.Context != nil {
 		params.Context = process.Context
 	}
+	if err := mod.BeforeQueryDataScope(process.Context, process.Global, &params); err != nil {
+		exception.Err(err, 403).Throw()
+	}
 	res := mod.MustGet(params)
 	return afterQueryDecrypt(process.ID, res)
 }
 
-// processPaginate 运行模型 MustPaginate
+// processPaginate 运行模型 MustPaginate (受行级数据权限 AOP 保护)
 func processPaginate(process *process.Process) interface{} {
 	process.ValidateArgNums(3)
 	mod := Select(process.ID)
@@ -225,6 +233,9 @@ func processPaginate(process *process.Process) interface{} {
 	if process.Context != nil {
 		params.Context = process.Context
 	}
+	if err := mod.BeforeQueryDataScope(process.Context, process.Global, &params); err != nil {
+		exception.Err(err, 403).Throw()
+	}
 
 	page := any.Of(process.Args[1]).CInt()
 	pagesize := any.Of(process.Args[2]).CInt()
@@ -232,7 +243,7 @@ func processPaginate(process *process.Process) interface{} {
 	return afterQueryDecrypt(process.ID, res)
 }
 
-// processCount 运行模型 MustCount
+// processCount 运行模型 MustCount (受行级数据权限 AOP 保护)
 func processCount(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	mod := Select(process.ID)
@@ -243,51 +254,81 @@ func processCount(process *process.Process) interface{} {
 	if process.Context != nil {
 		params.Context = process.Context
 	}
+	if err := mod.BeforeQueryDataScope(process.Context, process.Global, &params); err != nil {
+		exception.Err(err, 403).Throw()
+	}
 	return mod.MustCount(params)
 }
 
-// processCreate 运行模型 MustCreate
+// processCreate 运行模型 SecureCreate (防越权与自动归属填充)
 func processCreate(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	mod := Select(process.ID)
 	row := any.Of(process.Args[0]).Map().MapStrAny
 	row = beforePersistEncrypt(process.ID, row)
-	return mod.MustCreate(row, process.Context)
+	id, err := mod.SecureCreate(process.Context, process.Global, row)
+	if err != nil {
+		exception.Err(err, 403).Throw()
+	}
+	return id
 }
 
-// processUpdate 运行模型 MustUpdate
+// processUpdate 运行模型 SecureUpdateByID (防篡改与辖区核验)
 func processUpdate(process *process.Process) interface{} {
 	process.ValidateArgNums(2)
 	mod := Select(process.ID)
 	id := process.Args[0]
 	row := any.Of(process.Args[1]).Map().MapStrAny
 	row = beforePersistEncrypt(process.ID, row)
-	mod.MustUpdate(id, row, process.Context)
+	if err := mod.SecureUpdateByID(process.Context, process.Global, id, row); err != nil {
+		exception.Err(err, 403).Throw()
+	}
 	return nil
 }
 
-// processSave 运行模型 MustSave
+// processSave 运行模型 SecureSave (智能分流 Update/Create)
 func processSave(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	mod := Select(process.ID)
 	row := any.Of(process.Args[0]).Map().MapStrAny
 	row = beforePersistEncrypt(process.ID, row)
-	return mod.MustSave(row, process.Context)
+	id, err := mod.SecureSave(process.Context, process.Global, row)
+	if err != nil {
+		exception.Err(err, 403).Throw()
+	}
+	return id
 }
 
-// processDelete 运行模型 MustDelete
+// processDelete 运行模型 SecureDeleteByID (防误删与安全级联)
 func processDelete(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	mod := Select(process.ID)
-	mod.MustDelete(process.Args[0], process.Context)
+	var opt DeleteOptions
+	if len(process.Args) > 1 {
+		if m, ok := process.Args[1].(map[string]interface{}); ok {
+			opt = parseDeleteOptions(m)
+		}
+	}
+	if err := mod.SecureDeleteByID(process.Context, process.Global, process.Args[0], opt); err != nil {
+		exception.Err(err, 403).Throw()
+	}
 	return nil
 }
 
-// processDestroy 运行模型 MustDestroy
+// processDestroy 运行模型 SecureDeleteByID (物理真删除，受安全级联和受保护屏蔽保护)
 func processDestroy(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	mod := Select(process.ID)
-	mod.MustDestroy(process.Args[0], process.Context)
+	opt := DeleteOptions{HardDelete: true}
+	if len(process.Args) > 1 {
+		if m, ok := process.Args[1].(map[string]interface{}); ok {
+			opt = parseDeleteOptions(m)
+			opt.HardDelete = true
+		}
+	}
+	if err := mod.SecureDeleteByID(process.Context, process.Global, process.Args[0], opt); err != nil {
+		exception.Err(err, 403).Throw()
+	}
 	return nil
 }
 
@@ -329,7 +370,7 @@ func processInsert(process *process.Process) interface{} {
 	return nil
 }
 
-// processUpdateWhere 运行模型 MustUpdateWhere
+// processUpdateWhere 运行模型 MustUpdateWhere (受行级数据权限 AOP 保护)
 func processUpdateWhere(process *process.Process) interface{} {
 	process.ValidateArgNums(2)
 	mod := Select(process.ID)
@@ -340,12 +381,15 @@ func processUpdateWhere(process *process.Process) interface{} {
 	if process.Context != nil {
 		params.Context = process.Context
 	}
+	if err := mod.BeforeQueryDataScope(process.Context, process.Global, &params); err != nil {
+		exception.Err(err, 403).Throw()
+	}
 	row := any.Of(process.Args[1]).Map().MapStrAny
 	row = beforePersistEncrypt(process.ID, row)
 	return mod.MustUpdateWhere(params, row)
 }
 
-// processDeleteWhere 运行模型 MustDeleteWhere
+// processDeleteWhere 运行模型 SecureDeleteWhere
 func processDeleteWhere(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	mod := Select(process.ID)
@@ -356,10 +400,20 @@ func processDeleteWhere(process *process.Process) interface{} {
 	if process.Context != nil {
 		params.Context = process.Context
 	}
-	return mod.MustDeleteWhere(params)
+	var opt DeleteOptions
+	if len(process.Args) > 1 {
+		if m, ok := process.Args[1].(map[string]interface{}); ok {
+			opt = parseDeleteOptions(m)
+		}
+	}
+	affected, err := mod.SecureDeleteWhere(process.Context, process.Global, params, opt)
+	if err != nil {
+		exception.Err(err, 403).Throw()
+	}
+	return affected
 }
 
-// processDestroyWhere 运行模型 MustDestroyWhere
+// processDestroyWhere 运行模型 SecureDeleteWhere (HardDelete=true)
 func processDestroyWhere(process *process.Process) interface{} {
 	process.ValidateArgNums(1)
 	mod := Select(process.ID)
@@ -370,7 +424,38 @@ func processDestroyWhere(process *process.Process) interface{} {
 	if process.Context != nil {
 		params.Context = process.Context
 	}
-	return mod.MustDestroyWhere(params)
+	opt := DeleteOptions{HardDelete: true}
+	if len(process.Args) > 1 {
+		if m, ok := process.Args[1].(map[string]interface{}); ok {
+			opt = parseDeleteOptions(m)
+			opt.HardDelete = true
+		}
+	}
+	affected, err := mod.SecureDeleteWhere(process.Context, process.Global, params, opt)
+	if err != nil {
+		exception.Err(err, 403).Throw()
+	}
+	return affected
+}
+
+func parseDeleteOptions(m map[string]interface{}) DeleteOptions {
+	var opt DeleteOptions
+	if c, ok := m["cascade"]; ok {
+		opt.Cascade = c
+	}
+	if cf, ok := m["clear_foreign_keys"].(bool); ok {
+		opt.ClearForeignKeys = cf
+	}
+	if hd, ok := m["hard_delete"].(bool); ok {
+		opt.HardDelete = hd
+	}
+	if f, ok := m["force"].(bool); ok {
+		opt.Force = f
+	}
+	if r, ok := m["reason"].(string); ok {
+		opt.Reason = r
+	}
+	return opt
 }
 
 // processEachSave 运行模型 MustEachSave
@@ -618,4 +703,13 @@ func processUpsert(process *process.Process) interface{} {
 		exception.Err(err, 500).Throw()
 	}
 	return id
+}
+
+// processReloadDataScopes 重新从 sys_datascopes_access 表加载数据权限规格
+func processReloadDataScopes(process *process.Process) interface{} {
+	err := ReloadDataScopes()
+	if err != nil {
+		exception.Err(err, 500).Throw()
+	}
+	return true
 }

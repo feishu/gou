@@ -11,17 +11,16 @@ import (
 	"github.com/yaoapp/kun/maps"
 	"github.com/yaoapp/xun/capsule"
 	"github.com/yaoapp/xun/dbal"
+	"github.com/yaoapp/xun/dbal/query"
 )
 
 // Find 查询单条记录
 func (mod *Model) Find(id interface{}, param QueryParam) (maps.MapStr, error) {
 	param.Model = mod.Name
-	param.Wheres = []QueryWhere{
-		{
-			Column: mod.PrimaryKey,
-			Value:  id,
-		},
-	}
+	param.Wheres = append(param.Wheres, QueryWhere{
+		Column: mod.PrimaryKey,
+		Value:  id,
+	})
 	param.Limit = 1
 	stack := NewQueryStack(param)
 	res := stack.Run()
@@ -411,8 +410,15 @@ func (mod *Model) UpdateWhere(param QueryParam, row maps.MapStrAny) (int, error)
 		row.Set("updated_at", dbal.Raw("CURRENT_TIMESTAMP"))
 	}
 
+	driver := mod.Driver
+	if driver == "" && capsule.Global != nil {
+		if primary, err := capsule.Global.Primary(); err == nil && primary != nil && primary.Config != nil {
+			driver = primary.Config.Driver
+		}
+	}
+
 	// 如果不是 SQLite3 添加字段
-	if mod.Driver != "sqlite3" {
+	if driver != "sqlite3" {
 		for name, value := range row {
 			if !strings.Contains(name, ".") {
 				new := fmt.Sprintf("%s.%s", mod.MetaData.Table.Name, name)
@@ -423,8 +429,23 @@ func (mod *Model) UpdateWhere(param QueryParam, row maps.MapStrAny) (int, error)
 	}
 
 	param.Model = mod.Name
-	stack := NewQueryStack(param)
-	qb := stack.FirstQuery()
+	if param.Model == "" {
+		param.Model = mod.ID
+	}
+	var qb query.Query
+	if mod != nil {
+		qb = mod.Query(param.Context)
+	}
+	if qb == nil {
+		qb = capsule.Query()
+	}
+	qb = qb.Table(mod.MetaData.Table.Name)
+	if param.Context != nil {
+		qb = qb.WithContext(param.Context)
+	}
+	for _, where := range param.Wheres {
+		param.Where(where, qb, mod)
+	}
 	effect, err := qb.Update(row)
 	if err != nil {
 		return 0, err
@@ -484,6 +505,9 @@ func (mod *Model) DeleteWhere(param QueryParam) (int, error) {
 		}
 
 		param.Model = mod.Name
+		if param.Model == "" {
+			param.Model = mod.ID
+		}
 		stack := NewQueryStack(param)
 		qb := stack.FirstQuery()
 
@@ -514,6 +538,9 @@ func (mod *Model) DeleteWhere(param QueryParam) (int, error) {
 func (mod *Model) sqlite3DeleteWhere(param QueryParam) (int, error) {
 	data := maps.MapStrAny{}
 	param.Model = mod.Name
+	if param.Model == "" {
+		param.Model = mod.ID
+	}
 	stack := NewQueryStack(param)
 	qb := stack.FirstQuery()
 
@@ -551,7 +578,20 @@ func (mod *Model) MustDeleteWhere(param QueryParam) int {
 // DestroyWhere 批量真删除数据, 返回更新行数
 func (mod *Model) DestroyWhere(param QueryParam) (int, error) {
 	param.Model = mod.Name
-	qb := capsule.Query().Table(mod.MetaData.Table.Name)
+	if param.Model == "" {
+		param.Model = mod.ID
+	}
+	var qb query.Query
+	if mod != nil {
+		qb = mod.Query(param.Context)
+	}
+	if qb == nil {
+		qb = capsule.Query()
+	}
+	qb = qb.Table(mod.MetaData.Table.Name)
+	if param.Context != nil {
+		qb = qb.WithContext(param.Context)
+	}
 	for _, where := range param.Wheres {
 		param.Where(where, qb, mod)
 	}

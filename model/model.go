@@ -49,11 +49,13 @@ func LoadSource(source []byte, id string, file string) (*Model, error) {
 	}
 
 	mod := &Model{
-		ID:       id,
-		Name:     id,
-		File:     file,
-		MetaData: metadata,
-		source:   source,
+		ID:        id,
+		Name:      id,
+		File:      file,
+		MetaData:  metadata,
+		source:    source,
+		Protected: metadata.Protected,
+		DataScope: metadata.DataScope,
 	}
 
 	// Parse common values
@@ -316,4 +318,123 @@ func (mod *Model) Validate(row maps.MapStrAny) []ValidateResponse {
 // GetMetaInfo returns the meta information of the model
 func (mod *Model) GetMetaInfo() types.MetaInfo {
 	return mod.MetaData.MetaInfo
+}
+
+// GetDataScopeSpec 获取并规范化模型的数据权限规格配置 (遵循三级回退梯度)
+func (mod *Model) GetDataScopeSpec() ModelDataScopeSpec {
+	if mod == nil {
+		return ModelDataScopeSpec{}
+	}
+
+	// Level 1: 优先从 sys_datascopes_access 数据库注册表中动态获取 (按 Table.Name 与 ModelID 双键查找)
+	if mod.MetaData.Table.Name != "" {
+		if val, ok := DataScopeRegistry.Load(mod.MetaData.Table.Name); ok {
+			if spec, ok := val.(ModelDataScopeSpec); ok {
+				return normalizeSpecDefaults(spec)
+			}
+		}
+		if val, ok := DataScopeRegistry.Load(strings.ToLower(mod.MetaData.Table.Name)); ok {
+			if spec, ok := val.(ModelDataScopeSpec); ok {
+				return normalizeSpecDefaults(spec)
+			}
+		}
+	}
+	if mod.ID != "" {
+		if val, ok := DataScopeRegistry.Load(mod.ID); ok {
+			if spec, ok := val.(ModelDataScopeSpec); ok {
+				return normalizeSpecDefaults(spec)
+			}
+		}
+		if val, ok := DataScopeRegistry.Load(strings.ToLower(mod.ID)); ok {
+			if spec, ok := val.(ModelDataScopeSpec); ok {
+				return normalizeSpecDefaults(spec)
+			}
+		}
+	}
+
+	// Level 2: 回退到 mod.yao DSL 静态配置
+	spec := mod.DataScope
+	if !spec.Enabled && mod.MetaData.DataScope.Enabled {
+		spec = mod.MetaData.DataScope
+	}
+	if spec.Enabled {
+		return normalizeSpecDefaults(spec)
+	}
+
+	// Level 3: 约定探测兜底（若字段中同时包含 org_id/oid 与 dept_id/department_id）
+	return detectConventionSpec(mod)
+}
+
+// normalizeSpecDefaults 规范化默认字段名与阻断模式
+func normalizeSpecDefaults(spec ModelDataScopeSpec) ModelDataScopeSpec {
+	if spec.Mode == "" {
+		spec.Mode = "enforcing"
+	}
+	if spec.TenantField == "" {
+		spec.TenantField = "tenant_id"
+	}
+	if spec.OrgField == "" {
+		spec.OrgField = "org_id"
+	}
+	if spec.DeptField == "" {
+		spec.DeptField = "dept_id"
+	}
+	if spec.UserField == "" {
+		spec.UserField = "created_by"
+	}
+	return spec
+}
+
+// detectConventionSpec 启发式探测模型字段约定的数据权限规格
+func detectConventionSpec(mod *Model) ModelDataScopeSpec {
+	spec := ModelDataScopeSpec{
+		Enabled:     false,
+		Mode:        "enforcing",
+		TenantField: "tenant_id",
+		OrgField:    "org_id",
+		DeptField:   "dept_id",
+		UserField:   "created_by",
+	}
+
+	if mod == nil || len(mod.Columns) == 0 {
+		return spec
+	}
+
+	hasOrg := false
+	hasDept := false
+
+	for colName := range mod.Columns {
+		lower := strings.ToLower(colName)
+		switch lower {
+		case "org_id":
+			spec.OrgField = colName
+			hasOrg = true
+		case "oid":
+			if spec.OrgField == "org_id" && !hasOrg {
+				spec.OrgField = colName
+			}
+			hasOrg = true
+		case "dept_id":
+			spec.DeptField = colName
+			hasDept = true
+		case "department_id":
+			if spec.DeptField == "dept_id" && !hasDept {
+				spec.DeptField = colName
+			}
+			hasDept = true
+		case "tenant_id":
+			spec.TenantField = colName
+		case "tid":
+			spec.TenantField = colName
+		case "created_by", "creator":
+			spec.UserField = colName
+		}
+	}
+
+	// 仅当明确同时存在机构/组织字段以及科室/部门字段时，才作为约定兜底启用
+	if hasOrg && hasDept {
+		spec.Enabled = true
+	}
+
+	return spec
 }

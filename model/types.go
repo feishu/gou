@@ -35,6 +35,8 @@ type Model struct {
 	PrimaryKeys   []string           // 主键(联合主键)
 	UniqueColumns []*Column          // 唯一字段清单
 	source        []byte             // Source code
+	Protected     bool               // 防误删保护盾牌
+	DataScope     ModelDataScopeSpec // 行级数据权限配置
 }
 
 // MetaData 元数据
@@ -48,6 +50,8 @@ type MetaData struct {
 	Relations map[string]Relation `json:"relations,omitempty"` // 映射关系定义
 	Values    []maps.MapStrAny    `json:"values,omitempty"`    // 初始数值
 	Option    Option              `json:"option,omitempty"`    // 元数据配置
+	Protected bool                `json:"protected,omitempty"`  // 防误删保护盾牌
+	DataScope ModelDataScopeSpec `json:"data_scope,omitempty"` // 行级数据权限配置
 }
 
 // Column the field description struct
@@ -117,6 +121,7 @@ type Relation struct {
 	Foreign string     `json:"foreign,omitempty"`
 	Links   []Relation `json:"links,omitempty"`
 	Query   QueryParam `json:"query,omitempty"`
+	Cascade bool       `json:"cascade,omitempty"` // 静态级联删除标记
 }
 
 // Option 模型配置选项
