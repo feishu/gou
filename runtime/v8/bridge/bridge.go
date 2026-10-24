@@ -7,7 +7,7 @@ import (
 	"math/big"
 
 	"github.com/gin-gonic/gin"
-	jsoniter "github.com/json-iterator/go"
+	json "github.com/goccy/go-json"
 	"github.com/yaoapp/kun/exception"
 	"rogchap.com/v8go"
 )
@@ -280,7 +280,7 @@ func JsValue(ctx *v8go.Context, value interface{}) (*v8go.Value, error) {
 		return v8go.NewExternal(ctx.Isolate(), v)
 
 	case map[string]interface{}:
-		if len(v) <= 8 {
+		if len(v) <= 16 {
 			if jsVal, ok, err := jsMapSmallFast(ctx, v); ok {
 				return jsVal, err
 			}
@@ -302,9 +302,29 @@ func jsMapSmallFast(ctx *v8go.Context, m map[string]interface{}) (*v8go.Value, b
 			continue
 		}
 		switch val := raw.(type) {
-		case string, int32, uint32, int64, uint64, float64, bool, *big.Int:
+		case string, int32, uint32, float64, bool, *big.Int:
 			if err := tmpl.Set(k, val); err != nil {
 				return nil, true, err
+			}
+		case int64:
+			if val >= minSafeInteger && val <= maxSafeInteger {
+				if err := tmpl.Set(k, float64(val)); err != nil {
+					return nil, true, err
+				}
+			} else {
+				if err := tmpl.Set(k, val); err != nil {
+					return nil, true, err
+				}
+			}
+		case uint64:
+			if val <= uint64(maxSafeInteger) {
+				if err := tmpl.Set(k, float64(val)); err != nil {
+					return nil, true, err
+				}
+			} else {
+				if err := tmpl.Set(k, val); err != nil {
+					return nil, true, err
+				}
 			}
 		case int:
 			int64v := int64(val)
@@ -361,8 +381,7 @@ func jsMapSmallFast(ctx *v8go.Context, m map[string]interface{}) (*v8go.Value, b
 }
 
 func jsValueParse(ctx *v8go.Context, value interface{}) (*v8go.Value, error) {
-
-	data, err := jsoniter.Marshal(value)
+	data, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
 	}
@@ -481,26 +500,43 @@ func GoValue(value *v8go.Value, ctx *v8go.Context) (interface{}, error) {
 
 // Unmarshal cast javascript value to golang value
 func Unmarshal(value *v8go.Value, v interface{}) error {
-	data, err := value.MarshalJSON()
-	if err != nil {
-		return err
+	return v8go.JSONStringifyView(nil, value, func(view []byte) error {
+		if len(view) == 0 {
+			return nil
+		}
+		return json.Unmarshal(view, v)
+	})
+}
+
+// UnmarshalTo directly unmarshals a JavaScript value into a strongly-typed Go struct
+func UnmarshalTo[T any](value *v8go.Value) (*T, error) {
+	if value == nil || value.IsNull() || value.IsUndefined() {
+		return nil, nil
 	}
-	return jsoniter.Unmarshal(data, v)
+	var target T
+	err := v8go.JSONStringifyView(nil, value, func(view []byte) error {
+		if len(view) == 0 {
+			return nil
+		}
+		return json.Unmarshal(view, &target)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &target, nil
 }
 
 func goValueParse(value *v8go.Value, v interface{}) (interface{}, error) {
-
-	data, err := value.MarshalJSON()
-	if err != nil {
-		return nil, err
-	}
-
 	ptr := &v
-	err = jsoniter.Unmarshal(data, ptr)
+	err := v8go.JSONStringifyView(nil, value, func(view []byte) error {
+		if len(view) == 0 {
+			return nil
+		}
+		return json.Unmarshal(view, ptr)
+	})
 	if err != nil {
 		return nil, err
 	}
-
 	return *ptr, nil
 }
 

@@ -288,13 +288,7 @@ func (path Path) runStreamScript(ctx context.Context, c *gin.Context, getArgs ar
 		onError(err)
 		return
 	}
-	defer func() {
-		if g := v8ctx.Global(); g != nil {
-			_ = g.Delete("ssEvent")
-			_ = g.Delete("cancel")
-		}
-		v8ctx.Close()
-	}()
+	defer v8ctx.Close()
 
 	v8ctx.WithFunction("ssEvent", func(info *v8go.FunctionCallbackInfo) *v8go.Value {
 		args := info.Args()

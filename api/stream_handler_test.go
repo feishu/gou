@@ -43,6 +43,13 @@ function StreamSlow() {
 	}
 	return true;
 }
+
+function StreamLoop() {
+	while (true) {
+		ssEvent("loop", "running");
+	}
+	return true;
+}
 `
 	script, err := v8.MakeScript([]byte(scriptContent), "stream.js", 5*time.Second, false)
 	require.NoError(t, err)
@@ -130,6 +137,51 @@ function StreamSlow() {
 			require.True(t, time.Since(start) < 2*time.Second, "handler should return promptly on cancel")
 		case <-time.After(3 * time.Second):
 			t.Fatal("handler hung on client cancellation")
+		}
+	})
+
+	// Test 3: Running stream cancelled while in active loop exits cleanly without SIGSEGV
+	t.Run("LoopStreamClientCancelNoCrash", func(t *testing.T) {
+		router := gin.New()
+		path := Path{
+			Path:    "/stream/loop",
+			Method:  "GET",
+			Process: "scripts.tests.stream.StreamLoop",
+			Out: Out{
+				Type: "text/event-stream",
+			},
+		}
+
+		handler := path.streamHandler(func(c *gin.Context) []interface{} {
+			return nil
+		})
+		router.GET("/stream/loop", handler)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		req, _ := http.NewRequestWithContext(ctx, "GET", "/stream/loop", nil)
+		w := newCloseNotifyingRecorder()
+
+		// Cancel request after 10ms while stream script is in active execution
+		time.AfterFunc(10*time.Millisecond, func() {
+			cancel()
+			select {
+			case w.closed <- true:
+			default:
+			}
+		})
+
+		done := make(chan struct{})
+		start := time.Now()
+		go func() {
+			router.ServeHTTP(w, req)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			require.True(t, time.Since(start) < 2*time.Second, "handler should cancel promptly")
+		case <-time.After(3 * time.Second):
+			t.Fatal("handler hung on client cancellation during active loop")
 		}
 	})
 }

@@ -226,10 +226,37 @@ func (context *Context) CallWith(ctx context.Context, method string, args ...int
 	}
 }
 
+// Global returns the global object of the v8 context safely
+func (context *Context) Global() *v8go.Object {
+	if context == nil {
+		return nil
+	}
+	context.mu.Lock()
+	v8ctx := context.Context
+	closed := context.closed
+	context.mu.Unlock()
+
+	if closed || v8ctx == nil {
+		return nil
+	}
+	return v8ctx.Global()
+}
+
 // WithFunction add a function to the context
 func (context *Context) WithFunction(name string, cb v8go.FunctionCallback) {
-	tmpl := v8go.NewFunctionTemplate(context.v8Isolate(), cb)
-	context.Global().Set(name, tmpl.GetFunction(context.Context))
+	if context == nil {
+		return
+	}
+	g := context.Global()
+	if g == nil {
+		return
+	}
+	iso := context.v8Isolate()
+	if iso == nil {
+		return
+	}
+	tmpl := v8go.NewFunctionTemplate(iso, cb)
+	g.Set(name, tmpl.GetFunction(context.Context))
 }
 
 // WithGlobal add a global variable to the context

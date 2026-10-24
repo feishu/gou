@@ -185,3 +185,64 @@ func BenchmarkBridge_RoundTrip_100Records(b *testing.B) {
 		jsVal.Release()
 	}
 }
+
+type OrderResponse struct {
+	Total int         `json:"total"`
+	Page  int         `json:"page"`
+	Data  []OrderItem `json:"data"`
+}
+
+type OrderItem struct {
+	ID         int     `json:"id"`
+	OrderNo    string  `json:"order_no"`
+	UserID     int     `json:"user_id"`
+	Amount     float64 `json:"amount"`
+	Status     string  `json:"status"`
+	CreatedAt  string  `json:"created_at"`
+	ItemsCount int     `json:"items_count"`
+	Remark     string  `json:"remark"`
+}
+
+func BenchmarkBridge_UnmarshalTo_100Records(b *testing.B) {
+	iso := v8go.NewIsolate()
+	defer iso.Dispose()
+	ctx := v8go.NewContext(iso)
+	defer ctx.Close()
+
+	records := make([]map[string]interface{}, 100)
+	for i := 0; i < 100; i++ {
+		records[i] = map[string]interface{}{
+			"id":          1000 + i,
+			"order_no":    "ORD20260918000" + string(rune('0'+(i%10))),
+			"user_id":     20001,
+			"amount":      199.50,
+			"status":      "paid",
+			"created_at":  "2026-09-18 23:59:00",
+			"items_count": 3,
+			"remark":      "standard patient consultation fee payment record",
+		}
+	}
+	data := map[string]interface{}{
+		"total": 100,
+		"page":  1,
+		"data":  records,
+	}
+
+	jsVal, err := JsValue(ctx, data)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer jsVal.Release()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := UnmarshalTo[OrderResponse](jsVal)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if resp == nil || len(resp.Data) != 100 {
+			b.Fatal("unexpected response")
+		}
+	}
+}
