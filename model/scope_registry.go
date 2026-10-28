@@ -124,12 +124,12 @@ func parseScopeSpecFromJSON(raw interface{}) ModelDataScopeSpec {
 	}
 
 	var parsed struct {
-		Enabled     *bool   `json:"enabled"`
-		Mode        string  `json:"mode"`
-		TenantField string  `json:"tenant_field"`
-		OrgField    string  `json:"org_field"`
-		DeptField   string  `json:"dept_field"`
-		UserField   string  `json:"user_field"`
+		Enabled     *bool  `json:"enabled"`
+		Mode        string `json:"mode"`
+		TenantField string `json:"tenant_field"`
+		OrgField    string `json:"org_field"`
+		DeptField   string `json:"dept_field"`
+		UserField   string `json:"user_field"`
 	}
 
 	if err := json.Unmarshal(bytes, &parsed); err == nil {
