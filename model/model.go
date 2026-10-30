@@ -326,7 +326,7 @@ func (mod *Model) GetDataScopeSpec() ModelDataScopeSpec {
 		return ModelDataScopeSpec{}
 	}
 
-	// Level 1: 优先从 sys_datascopes_access 数据库注册表中动态获取 (按 Table.Name 与 ModelID 双键查找)
+	// Level 1: 优先从 sys_datascope_access 数据库注册表中动态获取 (按 Table.Name 与 ModelID 双键查找)
 	if mod.MetaData.Table.Name != "" {
 		if val, ok := DataScopeRegistry.Load(mod.MetaData.Table.Name); ok {
 			if spec, ok := val.(ModelDataScopeSpec); ok {
@@ -381,6 +381,11 @@ func normalizeSpecDefaults(spec ModelDataScopeSpec) ModelDataScopeSpec {
 	}
 	if spec.UserField == "" {
 		spec.UserField = "created_by"
+	}
+	if spec.TableRole != "" {
+		spec.TableRole = NormalizeTableRole(string(spec.TableRole))
+	} else {
+		spec.TableRole = TableRoleMaster
 	}
 	return spec
 }

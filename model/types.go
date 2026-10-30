@@ -151,19 +151,22 @@ type ExportData struct {
 
 // QueryParam 数据查询器参数
 type QueryParam struct {
-	Debug    bool            `json:"debug,omitempty"` // Whether to debug the query.
-	Model    string          `json:"model,omitempty"`
-	Table    string          `json:"table,omitempty"`
-	Alias    string          `json:"alias,omitempty"`
-	Export   string          `json:"export,omitempty"` // 导出前缀
-	Select   []interface{}   `json:"select,omitempty"` // string | dbal.Raw
-	Wheres   []QueryWhere    `json:"wheres,omitempty"`
-	Orders   []QueryOrder    `json:"orders,omitempty"`
-	Limit    int             `json:"limit,omitempty"`
-	Page     int             `json:"page,omitempty"`
-	PageSize int             `json:"pagesize,omitempty"`
-	Withs    map[string]With `json:"withs,omitempty"`
-	Context  context.Context `json:"-"`
+	Debug            bool            `json:"debug,omitempty"` // Whether to debug the query.
+	Model            string          `json:"model,omitempty"`
+	Table            string          `json:"table,omitempty"`
+	Alias            string          `json:"alias,omitempty"`
+	Export           string          `json:"export,omitempty"` // 导出前缀
+	Select           []interface{}   `json:"select,omitempty"` // string | dbal.Raw
+	Wheres           []QueryWhere    `json:"wheres,omitempty"`
+	Orders           []QueryOrder    `json:"orders,omitempty"`
+	Limit            int             `json:"limit,omitempty"`
+	Page             int             `json:"page,omitempty"`
+	PageSize         int             `json:"pagesize,omitempty"`
+	Withs            map[string]With `json:"withs,omitempty"`
+	Context          context.Context `json:"-"`
+	DataScope        *bool           `json:"data_scope,omitempty"`         // 显式指定是否开启数据权限 (如传入 false)
+	DisableDataScope bool            `json:"disable_data_scope,omitempty"` // 显式禁用数据权限
+	BypassDataScope  bool            `json:"bypass_datascope,omitempty"`  // 显式旁路数据权限
 }
 
 // With relations 关联查询

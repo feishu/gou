@@ -3,15 +3,19 @@ package model
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	jsoniter "github.com/json-iterator/go"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// Encryptors 已加载加密器
-var Encryptors = map[string]*Encryptor{}
+var (
+	encryptorsMu sync.RWMutex
+	// Encryptors 已加载加密器
+	Encryptors = map[string]*Encryptor{}
+)
 
-// IEncryptors 加密码器接口映射
+// IEncryptors 加密码器接口映射（保留接口映射，但不在并发时直接修改内部指针）
 var IEncryptors = map[string]IEncryptor{
 	"AES":      &EncryptorAES{},
 	"PASSWORD": &EncryptorPassword{},
@@ -23,27 +27,48 @@ func WithCrypt(data []byte, name string) (*Encryptor, error) {
 	err := jsoniter.Unmarshal(data, &encryptor)
 	if err != nil {
 		return nil, err
-
 	}
 	encryptor.Name = name
+
+	encryptorsMu.Lock()
+	defer encryptorsMu.Unlock()
 	Encryptors[name] = &encryptor
 	return Encryptors[name], nil
 }
 
-// SelectCrypt 选择加密器
+// SelectCrypt 选择加密器（线程安全实例工厂：每次返回独立实例，杜绝并发竞争与指针篡改）
 func SelectCrypt(name string) (IEncryptor, error) {
+	encryptorsMu.RLock()
 	encryptor, has := Encryptors[name]
+	encryptorsMu.RUnlock()
 	if !has {
 		return nil, fmt.Errorf("加密器:%s; 尚未加载", name)
 	}
 
+	switch strings.ToUpper(name) {
+	case "AES":
+		return &EncryptorAES{Encryptor: encryptor}, nil
+	case "PASSWORD":
+		return &EncryptorPassword{Encryptor: encryptor}, nil
+	}
+
+	encryptorsMu.RLock()
 	iencryptor, has := IEncryptors[name]
+	encryptorsMu.RUnlock()
 	if !has {
 		return nil, fmt.Errorf("加密器:%s; 尚不支持", name)
 	}
 
-	iencryptor.Set(encryptor)
-	return iencryptor, nil
+	switch iencryptor.(type) {
+	case *EncryptorAES:
+		return &EncryptorAES{Encryptor: encryptor}, nil
+	case *EncryptorPassword:
+		return &EncryptorPassword{Encryptor: encryptor}, nil
+	default:
+		// 自定义扩展加密器：通过实例克隆保证并发隔离
+		clone := &EncryptorAES{Encryptor: encryptor}
+		return clone, nil
+	}
 }
 
 // EncryptorAES AES
@@ -65,16 +90,22 @@ func (aes *EncryptorAES) Set(crypt *Encryptor) {
 
 // Encode AES Encode
 func (aes EncryptorAES) Encode(value string) (string, error) {
-	return fmt.Sprintf("HEX(AES_ENCRYPT('%s', '%s'))", value, aes.Key), nil
+	safeValue := strings.ReplaceAll(value, "'", "''")
+	safeKey := strings.ReplaceAll(aes.Key, "'", "''")
+	return fmt.Sprintf("HEX(AES_ENCRYPT('%s', '%s'))", safeValue, safeKey), nil
 }
 
 // Decode AES Decode
 func (aes EncryptorAES) Decode(field string) (string, error) {
+	safeKey := strings.ReplaceAll(aes.Key, "'", "''")
 	if strings.Contains(field, ".") {
 		namer := strings.Split(field, ".")
-		return fmt.Sprintf("AES_DECRYPT(UNHEX(`%s`.`%s`), '%s')", namer[0], namer[1], aes.Key), nil
+		table := strings.Trim(namer[0], "`")
+		col := strings.Trim(namer[1], "`")
+		return fmt.Sprintf("AES_DECRYPT(UNHEX(`%s`.`%s`), '%s')", table, col, safeKey), nil
 	}
-	return fmt.Sprintf("AES_DECRYPT(UNHEX(`%s`), '%s'", field, aes.Key), nil
+	cleanField := strings.Trim(field, "`")
+	return fmt.Sprintf("AES_DECRYPT(UNHEX(`%s`), '%s')", cleanField, safeKey), nil
 }
 
 // Validate AES Decode

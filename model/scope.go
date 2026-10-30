@@ -1,6 +1,10 @@
 package model
 
-import "github.com/yaoapp/kun/maps"
+import (
+	"strings"
+
+	"github.com/yaoapp/kun/maps"
+)
 
 // NewAccessScope creates a new AccessScope instance
 // Supports both maps.MapStr and map[string]interface{}
@@ -464,3 +468,31 @@ func (scope *AccessScope) Append(data interface{}) map[string]interface{} {
 
 	return result
 }
+
+// CheckIDORDetailProbe 详情主键轻量探针 (杜绝空列表误报权限受限)
+// 当且仅当单条主键定位查询返回 0 条时触发判定，普通列表查询绝不误触发
+func CheckIDORDetailProbe(param QueryParam, resultCount int) bool {
+	// 普通多记录查询或结果非空时，坚决不探针，杜绝误报
+	if resultCount > 0 {
+		return false
+	}
+
+	// 检查是否具备单条主键或患者 ID 定位条件
+	hasPrimaryKey := false
+	for _, w := range param.Wheres {
+		colStr, ok := w.Column.(string)
+		if !ok {
+			continue
+		}
+		col := strings.ToLower(colStr)
+		if col == "id" || col == "uuid" || col == "patient_id" {
+			if w.Value != nil && w.Value != "" && w.Value != 0 {
+				hasPrimaryKey = true
+				break
+			}
+		}
+	}
+
+	return hasPrimaryKey
+}
+

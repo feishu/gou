@@ -15,13 +15,56 @@ func (mod *Model) BeforeQueryDataScope(ctx context.Context, global map[string]in
 		return nil
 	}
 
+	// 1. 检查 Bypass 短路：上游显式传入 data_scope: false / disable_data_scope: true / bypass_data_scope: true
+	if param != nil {
+		if param.DisableDataScope || param.BypassDataScope || (param.DataScope != nil && !*param.DataScope) {
+			modID := "unknown"
+			if mod != nil {
+				modID = mod.ID
+			}
+			log.Trace("[DATA_SCOPE_BYPASS] Model: %s, QueryParam bypassed data scope", modID)
+			return nil
+		}
+	}
+	if global != nil {
+		if val, ok := global["data_scope"]; ok {
+			if b, ok := val.(bool); ok && !b {
+				return nil
+			}
+		}
+		if val, ok := global["disable_data_scope"]; ok {
+			if b, ok := val.(bool); ok && b {
+				return nil
+			}
+		}
+		if val, ok := global["bypass_data_scope"]; ok {
+			if b, ok := val.(bool); ok && b {
+				return nil
+			}
+		}
+	}
+
 	spec := mod.GetDataScopeSpec()
 	if !spec.Enabled {
 		return nil
 	}
 
 	sec, bindings := ResolveSecurityContext(ctx, global)
-	plan := ReduceRoleScopes(sec, bindings)
+
+	// V3.3: 优先使用双轨角色元组 (RoleScopeTuple) 进行降阶，兼容回退至经典 bindings
+	var plan ReducedScopePlan
+	if global != nil {
+		if tuples, ok := global["role_scope_tuples"].([]RoleScopeTuple); ok && len(tuples) > 0 {
+			var intentCap ScopeType
+			if sec != nil && sec.IntentScopeCap > 0 {
+				intentCap = sec.IntentScopeCap
+			}
+			plan, _ = ReduceRoleScopeTuples(sec, tuples, intentCap)
+		}
+	}
+	if plan.EffectiveReadScope == 0 {
+		plan = ReduceRoleScopes(sec, bindings)
+	}
 
 	var customSchema *ConditionValueSchema
 	for _, b := range bindings {
@@ -70,14 +113,18 @@ func BuildAndInjectQueryWhere(
 
 	var topAndWheres []QueryWhere
 
-	// 2. 提取公因子：TenantID
-	if plan.EnforceTenant && spec.TenantField != "" && sec != nil && sec.TenantID > 0 {
+	// 2. 提取公因子：TenantID (多租户绝对基石，单租户及多租户实参均必须隔离)
+	if spec.TenantField != "" && sec != nil && sec.TenantID > 0 {
 		if mod == nil || mod.Columns == nil || mod.Columns[spec.TenantField] != nil {
-			topAndWheres = append(topAndWheres, QueryWhere{
-				Method: "where",
-				Column: formatColumn(prefix, spec.TenantField),
-				Value:  sec.TenantID,
-			})
+			if len(plan.AllowedTenantIDs) > 0 {
+				topAndWheres = append(topAndWheres, buildInOrEqWhere("where", formatColumn(prefix, spec.TenantField), plan.AllowedTenantIDs))
+			} else {
+				topAndWheres = append(topAndWheres, QueryWhere{
+					Method: "where",
+					Column: formatColumn(prefix, spec.TenantField),
+					Value:  sec.TenantID,
+				})
+			}
 		}
 	}
 
@@ -92,7 +139,7 @@ func BuildAndInjectQueryWhere(
 				})
 			} else if len(plan.AllowedOrgIDs) > 0 {
 				topAndWheres = append(topAndWheres, buildInOrEqWhere("where", formatColumn(prefix, spec.OrgField), plan.AllowedOrgIDs))
-			} else if !plan.EnforceTenant && sec != nil && sec.OrgID > 0 {
+			} else if sec != nil && sec.OrgID > 0 {
 				topAndWheres = append(topAndWheres, QueryWhere{
 					Method: "where",
 					Column: formatColumn(prefix, spec.OrgField),
@@ -100,6 +147,26 @@ func BuildAndInjectQueryWhere(
 				})
 			}
 		}
+	}
+
+	// 3.1 主从表降阶支持 (V3.3)：明细从表仅继承租户和机构隔离边界，跳过科室/人员检查与注入
+	if spec.TableRole == TableRoleSlave {
+		if len(topAndWheres) == 0 {
+			return nil
+		}
+		if strings.EqualFold(spec.Mode, "shadow") {
+			modID := "unknown"
+			if mod != nil {
+				modID = mod.ID
+			}
+			logShadowScopeDiff(modID, param, topAndWheres)
+			return nil
+		}
+		injectSafeGroup(param, QueryWhere{
+			Method: "where",
+			Wheres: topAndWheres,
+		})
+		return nil
 	}
 
 	// 4. 自定义规则优先
@@ -333,6 +400,40 @@ func ResolveSecurityContext(ctx context.Context, global map[string]interface{}) 
 		}
 		if rawSubs, ok := global["sub_dept_ids"]; ok {
 			sec.SubDeptIDs = toInt64Slice(rawSubs)
+		}
+		// V3.3: 提取多院区、病区、医疗组与医生维度上下文
+		if rawDocID, ok := global["doctor_id"]; ok {
+			sec.DoctorID, _ = toInt64(rawDocID)
+		}
+		if rawCampus, ok := global["active_campus_id"]; ok {
+			sec.ActiveCampusID, _ = toInt64(rawCampus)
+		}
+		if rawActDept, ok := global["active_dept_id"]; ok {
+			sec.ActiveDeptID, _ = toInt64(rawActDept)
+		}
+		if rawWard, ok := global["active_ward_id"]; ok {
+			sec.ActiveWardID, _ = toInt64(rawWard)
+		}
+		if rawGroup, ok := global["active_group_id"]; ok {
+			sec.ActiveGroupID, _ = toInt64(rawGroup)
+		}
+		if rawNurse, ok := global["is_outpatient_nurse"].(bool); ok {
+			sec.IsOutpatientNurse = rawNurse
+		}
+		if rawCross, ok := global["allow_cross_ward"].(bool); ok {
+			sec.AllowCrossWard = rawCross
+		}
+		if rawCampuses, ok := global["allowed_campus_ids"]; ok {
+			sec.AllowedCampusIDs = toInt64Slice(rawCampuses)
+		}
+		if rawWards, ok := global["allowed_ward_ids"]; ok {
+			sec.AllowedWardIDs = toInt64Slice(rawWards)
+		}
+		if rawGroups, ok := global["allowed_group_ids"]; ok {
+			sec.AllowedGroupIDs = toInt64Slice(rawGroups)
+		}
+		if sec.DeptID <= 0 && sec.ActiveDeptID > 0 {
+			sec.DeptID = sec.ActiveDeptID
 		}
 	}
 

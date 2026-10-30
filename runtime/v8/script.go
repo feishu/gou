@@ -136,6 +136,60 @@ func LoadRoot(file string, id string) (*Script, error) {
 	return script, nil
 }
 
+// LoadTo loads the script into a target registry map without touching the global Scripts map
+func LoadTo(file string, id string, target map[string]*Script) (*Script, error) {
+	source, err := application.App.Read(file)
+	if err != nil {
+		return nil, err
+	}
+	script, err := MakeScript(source, file, 5*time.Second, false)
+	if err != nil {
+		return nil, err
+	}
+	if target != nil {
+		target[id] = script
+	}
+	return script, nil
+}
+
+// LoadRootTo loads the root script into a target registry map without touching the global RootScripts map
+func LoadRootTo(file string, id string, target map[string]*Script) (*Script, error) {
+	source, err := application.App.Read(file)
+	if err != nil {
+		return nil, err
+	}
+	script, err := MakeScript(source, file, 5*time.Second, true)
+	if err != nil {
+		return nil, err
+	}
+	if target != nil {
+		target[id] = script
+	}
+	return script, nil
+}
+
+// ReplaceRootScripts safely replaces the global root scripts registry under syncLock
+func ReplaceRootScripts(newScripts map[string]*Script) {
+	syncLock.Lock()
+	defer syncLock.Unlock()
+	if newScripts == nil {
+		RootScripts = map[string]*Script{}
+		return
+	}
+	RootScripts = newScripts
+}
+
+// ReplaceScripts safely replaces the global scripts registry under syncLock
+func ReplaceScripts(newScripts map[string]*Script) {
+	syncLock.Lock()
+	defer syncLock.Unlock()
+	if newScripts == nil {
+		Scripts = map[string]*Script{}
+		return
+	}
+	Scripts = newScripts
+}
+
 // ResetScripts safely resets the global scripts registry under syncLock
 func ResetScripts() {
 	syncLock.Lock()

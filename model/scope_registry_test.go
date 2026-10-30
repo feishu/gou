@@ -168,9 +168,9 @@ func TestReloadDataScopesWithRealCapsuleTable(t *testing.T) {
 	defer manager.Close()
 
 	sch := capsule.Schema()
-	sch.MustDropTableIfExists("sys_datascopes_access")
+	sch.MustDropTableIfExists("sys_datascope_access")
 
-	sch.MustCreateTable("sys_datascopes_access", func(table schema.Blueprint) {
+	sch.MustCreateTable("sys_datascope_access", func(table schema.Blueprint) {
 		table.ID("id")
 		table.String("uuid", 36)
 		table.String("name", 255).Null()
@@ -181,10 +181,10 @@ func TestReloadDataScopesWithRealCapsuleTable(t *testing.T) {
 		table.Timestamps()
 		table.SoftDeletes()
 	})
-	defer sch.MustDropTableIfExists("sys_datascopes_access")
+	defer sch.MustDropTableIfExists("sys_datascope_access")
 
 	// 插入一条测试数据
-	err = capsule.Query().Table("sys_datascopes_access").Insert(map[string]interface{}{
+	err = capsule.Query().Table("sys_datascope_access").Insert(map[string]interface{}{
 		"uuid":            "test-uuid-101",
 		"name":            "门诊病历科室隔离测试",
 		"scope_type":      2,

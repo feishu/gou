@@ -705,7 +705,7 @@ func processUpsert(process *process.Process) interface{} {
 	return id
 }
 
-// processReloadDataScopes 重新从 sys_datascopes_access 表加载数据权限规格
+// processReloadDataScopes 重新从 sys_datascope_access 表加载数据权限规格
 func processReloadDataScopes(process *process.Process) interface{} {
 	err := ReloadDataScopes()
 	if err != nil {

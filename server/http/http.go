@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -33,18 +34,35 @@ func New(router *gin.Engine, option Option) *Server {
 		option.IdleTimeout = 120 * time.Second
 	}
 
-	return &Server{
-		router: router,
+	server := &Server{
 		option: &option,
 		signal: make(chan uint8, 1),
 		event:  make(chan uint8, 1),
 		status: CREATED,
 	}
+	if router != nil {
+		server.router.Store(router)
+	}
+	return server
 }
 
-// Reset the http server
+// Reset the http server router
 func (server *Server) Reset(router *gin.Engine) {
-	server.router = router
+	server.SwapRouter(router)
+}
+
+// SwapRouter atomically swaps the router of the http server without dropping connections
+func (server *Server) SwapRouter(router *gin.Engine) {
+	server.router.Store(router)
+	upgraders := websocket.AllUpgraders()
+	for _, upgrader := range upgraders {
+		upgrader.SetRouter(router)
+	}
+}
+
+// Router returns current router
+func (server *Server) Router() *gin.Engine {
+	return server.router.Load()
 }
 
 // Event get event signal
@@ -100,9 +118,17 @@ func (server *Server) Start() error {
 
 	// network preparing
 	server.addr = listener.Addr()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if curRouter := server.router.Load(); curRouter != nil {
+			curRouter.ServeHTTP(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
+
 	srv := &http.Server{
 		Addr:              server.addr.String(),
-		Handler:           server.router,
+		Handler:           handler,
 		ReadHeaderTimeout: server.option.ReadHeaderTimeout,
 		IdleTimeout:       server.option.IdleTimeout,
 	}
@@ -138,7 +164,9 @@ func (server *Server) Start() error {
 
 		// Start WebSocket Hub
 		for id, upgrader := range upgraders {
-			upgrader.SetRouter(server.router)
+			if r := server.router.Load(); r != nil {
+				upgrader.SetRouter(r)
+			}
 			go upgrader.Start()
 			log.Info("Websocket %s start", id)
 		}
@@ -156,7 +184,7 @@ func (server *Server) Start() error {
 	go func() {
 		server.status = READY
 		server.event <- READY
-		if errSrv := srv.Serve(listener); errSrv != nil && errSrv != http.ErrServerClosed {
+		if errSrv := srv.Serve(listener); errSrv != nil && errSrv != http.ErrServerClosed && !errors.Is(errSrv, net.ErrClosed) {
 			err = errSrv
 			log.Error("[Server] %s %s", srv.Addr, errSrv.Error())
 			server.signal <- ERROR
@@ -207,23 +235,35 @@ func (server *Server) Start() error {
 				log.Info("[Server] %s was closed (for restarting)", srv.Addr)
 				server.status = RESTARTING
 
-				err = listener.Close()
-				if err != nil {
-					log.Error("[Server] %s restarting (%s)", srv.Addr, err.Error())
-					return err
+				drainTimeout := server.option.DrainTimeout
+				if drainTimeout <= 0 {
+					drainTimeout = 15 * time.Second
 				}
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+				defer cancel()
 
-				err = srv.Close()
+				err := srv.Shutdown(shutdownCtx)
 				if err != nil {
-					log.Error("[Server] %s restarting (%s)", srv.Addr, err.Error())
-					return err
+					log.Warn("[Server] %s graceful shutdown warning: %v, forcing close", srv.Addr, err)
+					_ = srv.Close()
+				}
+				_ = listener.Close()
+
+				// drain any stale signal in channel before restarting
+				select {
+				case <-server.signal:
+				default:
 				}
 
 				defer server.Start()
 				return nil
 
 			case ERROR:
-				log.Error("[Server] %s was closed (%s)", srv.Addr, err.Error())
+				errMsg := "unknown error"
+				if err != nil {
+					errMsg = err.Error()
+				}
+				log.Error("[Server] %s was closed (%s)", srv.Addr, errMsg)
 				return err
 
 			default:
@@ -254,8 +294,10 @@ func (server *Server) Restart() error {
 
 // With middlewares
 func (server *Server) With(middlewares ...func(ctx *gin.Context)) *Server {
-	for _, middleware := range middlewares {
-		server.router.Use(middleware)
+	if r := server.router.Load(); r != nil {
+		for _, middleware := range middlewares {
+			r.Use(middleware)
+		}
 	}
 	return server
 }

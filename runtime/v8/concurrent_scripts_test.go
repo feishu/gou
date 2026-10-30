@@ -54,3 +54,85 @@ func TestConcurrentScriptSelectAndExists(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestConcurrentReplaceScriptsZeroDowntime(t *testing.T) {
+	// Seed initial registry
+	initial := map[string]*Script{
+		"test.zero.downtime": {ID: "test.zero.downtime", File: "v1.js"},
+	}
+	ReplaceScripts(initial)
+
+	var wg sync.WaitGroup
+	workers := 20
+	iterations := 200
+
+	// Readers continuously read test.zero.downtime - should NEVER hit 404
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				sc, err := Select("test.zero.downtime")
+				assert.NoError(t, err, "script must not experience 404 outage during atomic swap")
+				assert.NotNil(t, sc)
+			}
+		}()
+	}
+
+	// Swapper simulates hot reloads with double-buffering
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for k := 0; k < 30; k++ {
+			draft := map[string]*Script{
+				"test.zero.downtime": {ID: "test.zero.downtime", File: fmt.Sprintf("v%d.js", k)},
+				fmt.Sprintf("test.new.%d", k): {ID: fmt.Sprintf("test.new.%d", k), File: "new.js"},
+			}
+			ReplaceScripts(draft)
+			time.Sleep(1 * time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+}
+
+func TestConcurrentReplaceRootScriptsZeroDowntime(t *testing.T) {
+	// Seed initial root registry
+	initial := map[string]*Script{
+		"studio.zero.downtime": {ID: "studio.zero.downtime", File: "v1.js", Root: true},
+	}
+	ReplaceRootScripts(initial)
+
+	var wg sync.WaitGroup
+	workers := 20
+	iterations := 200
+
+	// Readers continuously read studio.zero.downtime - should NEVER hit 404
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				sc, err := SelectRoot("studio.zero.downtime")
+				assert.NoError(t, err, "root script must not experience 404 outage during atomic swap")
+				assert.NotNil(t, sc)
+			}
+		}()
+	}
+
+	// Swapper simulates hot reloads with double-buffering
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for k := 0; k < 30; k++ {
+			draft := map[string]*Script{
+				"studio.zero.downtime": {ID: "studio.zero.downtime", File: fmt.Sprintf("v%d.js", k), Root: true},
+				fmt.Sprintf("studio.new.%d", k): {ID: fmt.Sprintf("studio.new.%d", k), File: "new.js", Root: true},
+			}
+			ReplaceRootScripts(draft)
+			time.Sleep(1 * time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+}

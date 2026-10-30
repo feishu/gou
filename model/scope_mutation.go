@@ -8,18 +8,199 @@ import (
 	"github.com/yaoapp/kun/maps"
 )
 
+// isMutationBypassed 判定写操作是否显式旁路穿透
+func isMutationBypassed(global map[string]interface{}) bool {
+	if os.Getenv("YAO_DATASCOPE_GLOBAL_DISABLE") == "true" {
+		return true
+	}
+	if global != nil {
+		if val, ok := global["data_scope"]; ok {
+			if b, ok := val.(bool); ok && !b {
+				return true
+			}
+		}
+		if val, ok := global["disable_data_scope"]; ok {
+			if b, ok := val.(bool); ok && b {
+				return true
+			}
+		}
+		if val, ok := global["bypass_data_scope"]; ok {
+			if b, ok := val.(bool); ok && b {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resolveMutationPlan 解析当前安全上下文并计算写变更执行计划
+func (mod *Model) resolveMutationPlan(ctx context.Context, global map[string]interface{}) (*SecurityContext, ReducedMutationPlan, ModelDataScopeSpec, error) {
+	spec := mod.GetDataScopeSpec()
+	if !spec.Enabled {
+		return nil, ReducedMutationPlan{EffectiveWriteScope: ScopeTypeAll}, spec, nil
+	}
+
+	sec, bindings := ResolveSecurityContext(ctx, global)
+
+	var writePlan ReducedMutationPlan
+	if global != nil {
+		if tuples, ok := global["role_scope_tuples"].([]RoleScopeTuple); ok && len(tuples) > 0 {
+			var intentCap ScopeType
+			if sec != nil && sec.IntentScopeCap > 0 {
+				intentCap = sec.IntentScopeCap
+			}
+			_, writePlan = ReduceRoleScopeTuples(sec, tuples, intentCap)
+		}
+	}
+
+	// 兼容未传入 role_scope_tuples 的场景
+	if writePlan.EffectiveWriteScope == 0 && !writePlan.IsReadOnlyBlocked {
+		readPlan := ReduceRoleScopes(sec, bindings)
+		if readPlan.IsUnrestricted {
+			writePlan = ReducedMutationPlan{EffectiveWriteScope: ScopeTypeAll}
+		} else if readPlan.IsDenied {
+			writePlan = ReducedMutationPlan{IsReadOnlyBlocked: true, EffectiveWriteScope: ScopeTypeDenied}
+		} else {
+			writePlan = ReducedMutationPlan{
+				EffectiveWriteScope: ScopeTypeSelf,
+				StrictSelfDoctorID:  sec.DoctorID,
+				AllowedWriteDeptIDs: readPlan.AllowedDeptIDs,
+			}
+			if readPlan.EnforceOrg {
+				writePlan.EffectiveWriteScope = ScopeTypeOrg
+			} else if len(readPlan.AllowedDeptIDs) > 0 {
+				writePlan.EffectiveWriteScope = ScopeTypeUnit
+			}
+		}
+	}
+
+	return sec, writePlan, spec, nil
+}
+
+// injectMutationWhere 为写操作（UPDATE / DELETE）注入行级权限与隔离边界
+func (mod *Model) injectMutationWhere(
+	param *QueryParam,
+	sec *SecurityContext,
+	plan ReducedMutationPlan,
+	spec ModelDataScopeSpec,
+) error {
+	if plan.EffectiveWriteScope == ScopeTypeAll {
+		return nil
+	}
+	if plan.IsReadOnlyBlocked {
+		return ErrDataScopeReadOnlyBlocked
+	}
+
+	prefix := resolveTableAlias(mod, param)
+	var mutationWheres []QueryWhere
+
+	// 1. 租户公因子
+	if spec.TenantField != "" && sec != nil && sec.TenantID > 0 {
+		if mod == nil || mod.Columns == nil || mod.Columns[spec.TenantField] != nil {
+			mutationWheres = append(mutationWheres, QueryWhere{
+				Method: "where",
+				Column: formatColumn(prefix, spec.TenantField),
+				Value:  sec.TenantID,
+			})
+		}
+	}
+
+	// 2. 机构公因子
+	if spec.OrgField != "" && sec != nil && sec.OrgID > 0 {
+		if mod == nil || mod.Columns == nil || mod.Columns[spec.OrgField] != nil {
+			mutationWheres = append(mutationWheres, QueryWhere{
+				Method: "where",
+				Column: formatColumn(prefix, spec.OrgField),
+				Value:  sec.OrgID,
+			})
+		}
+	}
+
+	// 3. 从表 (TableRoleSlave) 仅需租户与机构边界守护
+	if spec.TableRole == TableRoleSlave {
+		if len(mutationWheres) > 0 {
+			injectSafeGroup(param, QueryWhere{
+				Method: "where",
+				Wheres: mutationWheres,
+			})
+		}
+		return nil
+	}
+
+	// 4. 个人级写控制 (ScopeTypeSelf)：强制绑定医生或创建者
+	if plan.EffectiveWriteScope == ScopeTypeSelf {
+		doctorCol := "doctor_id"
+		hasDoctorCol := false
+		if mod != nil && mod.Columns != nil && mod.Columns[doctorCol] != nil {
+			hasDoctorCol = true
+		}
+
+		if hasDoctorCol && sec != nil && sec.DoctorID > 0 {
+			mutationWheres = append(mutationWheres, QueryWhere{
+				Method: "where",
+				Column: formatColumn(prefix, doctorCol),
+				Value:  sec.DoctorID,
+			})
+		} else if spec.UserField != "" && sec != nil && sec.UserID > 0 {
+			if mod == nil || mod.Columns == nil || mod.Columns[spec.UserField] != nil {
+				mutationWheres = append(mutationWheres, QueryWhere{
+					Method: "where",
+					Column: formatColumn(prefix, spec.UserField),
+					Value:  sec.UserID,
+				})
+			}
+		}
+	} else if plan.EffectiveWriteScope.Rank() >= ScopeTypeUnit.Rank() && plan.EffectiveWriteScope.Rank() < ScopeTypeOrg.Rank() {
+		// 5. 科室级写控制
+		if spec.DeptField != "" {
+			if mod == nil || mod.Columns == nil || mod.Columns[spec.DeptField] != nil {
+				if len(plan.AllowedWriteDeptIDs) > 0 {
+					mutationWheres = append(mutationWheres, buildInOrEqWhere("where", formatColumn(prefix, spec.DeptField), plan.AllowedWriteDeptIDs))
+				} else if sec != nil && (sec.ActiveDeptID > 0 || sec.DeptID > 0) {
+					deptID := sec.ActiveDeptID
+					if deptID <= 0 {
+						deptID = sec.DeptID
+					}
+					mutationWheres = append(mutationWheres, QueryWhere{
+						Method: "where",
+						Column: formatColumn(prefix, spec.DeptField),
+						Value:  deptID,
+					})
+				}
+			}
+		}
+	}
+
+	if len(mutationWheres) > 0 {
+		injectSafeGroup(param, QueryWhere{
+			Method: "where",
+			Wheres: mutationWheres,
+		})
+	}
+	return nil
+}
+
 // SecureUpdateByID 单点主键安全更新：强制数据归属防篡改、科室辖区核验，并免疫 IDOR 越权
 func (mod *Model) SecureUpdateByID(ctx context.Context, global map[string]interface{}, id interface{}, payload maps.MapStrAny) error {
-	if os.Getenv("YAO_DATASCOPE_GLOBAL_DISABLE") == "true" {
+	if isMutationBypassed(global) {
 		return mod.Update(id, payload, ctx)
 	}
 
-	spec := mod.GetDataScopeSpec()
+	sec, writePlan, spec, err := mod.resolveMutationPlan(ctx, global)
+	if err != nil {
+		return err
+	}
 	if !spec.Enabled {
 		return mod.Update(id, payload, ctx)
 	}
 
-	if err := mod.sanitizeWritePayload(ctx, global, spec, payload, false); err != nil {
+	// 1. 只读保护拦截
+	if writePlan.IsReadOnlyBlocked {
+		return ErrDataScopeReadOnlyBlocked
+	}
+
+	// 2. 净化 Payload
+	if err := mod.sanitizeMutationPayload(sec, writePlan, spec, payload, false); err != nil {
 		return err
 	}
 
@@ -31,7 +212,7 @@ func (mod *Model) SecureUpdateByID(ctx context.Context, global map[string]interf
 		},
 	}
 
-	if err := mod.BeforeQueryDataScope(ctx, global, &param); err != nil {
+	if err := mod.injectMutationWhere(&param, sec, writePlan, spec); err != nil {
 		return err
 	}
 
@@ -55,18 +236,27 @@ func (mod *Model) SecureUpdateByID(ctx context.Context, global map[string]interf
 	return nil
 }
 
-// SecureCreate 单条记录安全创建：自动填充租户/机构归属，校验科室管辖权
+// SecureCreate 单条记录安全创建：Before-Insert 守护，自动填充租户/机构归属，校验科室管辖权，强制本人医生身份绑定
 func (mod *Model) SecureCreate(ctx context.Context, global map[string]interface{}, row maps.MapStrAny) (interface{}, error) {
-	if os.Getenv("YAO_DATASCOPE_GLOBAL_DISABLE") == "true" {
+	if isMutationBypassed(global) {
 		return mod.Create(row, ctx)
 	}
 
-	spec := mod.GetDataScopeSpec()
+	sec, writePlan, spec, err := mod.resolveMutationPlan(ctx, global)
+	if err != nil {
+		return nil, err
+	}
 	if !spec.Enabled {
 		return mod.Create(row, ctx)
 	}
 
-	if err := mod.sanitizeWritePayload(ctx, global, spec, row, true); err != nil {
+	// 1. 只读保护拦截
+	if writePlan.IsReadOnlyBlocked {
+		return nil, ErrDataScopeReadOnlyBlocked
+	}
+
+	// 2. 净化与字段强制注入
+	if err := mod.sanitizeMutationPayload(sec, writePlan, spec, row, true); err != nil {
 		return nil, err
 	}
 
@@ -101,19 +291,27 @@ func (mod *Model) SecureDeleteByID(ctx context.Context, global map[string]interf
 		return err
 	}
 
-	if os.Getenv("YAO_DATASCOPE_GLOBAL_DISABLE") == "true" {
+	if isMutationBypassed(global) {
 		if opt.HardDelete {
 			return mod.Destroy(id, ctx)
 		}
 		return mod.Delete(id, ctx)
 	}
 
-	spec := mod.GetDataScopeSpec()
+	sec, writePlan, spec, err := mod.resolveMutationPlan(ctx, global)
+	if err != nil {
+		return err
+	}
 	if !spec.Enabled {
 		if opt.HardDelete {
 			return mod.Destroy(id, ctx)
 		}
 		return mod.Delete(id, ctx)
+	}
+
+	// 只读保护拦截
+	if writePlan.IsReadOnlyBlocked {
+		return ErrDataScopeReadOnlyBlocked
 	}
 
 	param := QueryParam{
@@ -124,14 +322,11 @@ func (mod *Model) SecureDeleteByID(ctx context.Context, global map[string]interf
 		},
 	}
 
-	if err := mod.BeforeQueryDataScope(ctx, global, &param); err != nil {
+	if err := mod.injectMutationWhere(&param, sec, writePlan, spec); err != nil {
 		return err
 	}
 
-	var (
-		affected int
-		err      error
-	)
+	var affected int
 	if opt.HardDelete {
 		affected, err = mod.DestroyWhere(param)
 	} else {
@@ -157,16 +352,23 @@ func (mod *Model) SecureDeleteWhere(ctx context.Context, global map[string]inter
 		opt = options[0]
 	}
 
-	if os.Getenv("YAO_DATASCOPE_GLOBAL_DISABLE") == "true" {
+	if isMutationBypassed(global) {
 		if opt.HardDelete {
 			return mod.DestroyWhere(param)
 		}
 		return mod.DeleteWhere(param)
 	}
 
-	spec := mod.GetDataScopeSpec()
+	sec, writePlan, spec, err := mod.resolveMutationPlan(ctx, global)
+	if err != nil {
+		return 0, err
+	}
+
 	if spec.Enabled {
-		if err := mod.BeforeQueryDataScope(ctx, global, &param); err != nil {
+		if writePlan.IsReadOnlyBlocked {
+			return 0, ErrDataScopeReadOnlyBlocked
+		}
+		if err := mod.injectMutationWhere(&param, sec, writePlan, spec); err != nil {
 			return 0, err
 		}
 	}
@@ -205,17 +407,15 @@ func (mod *Model) SecureDeleteWhere(ctx context.Context, global map[string]inter
 	return mod.DeleteWhere(param)
 }
 
-// sanitizeWritePayload 净化写操作数据负载，防篡改与越权分配
-func (mod *Model) sanitizeWritePayload(
-	ctx context.Context,
-	global map[string]interface{},
+// sanitizeMutationPayload 净化写操作数据负载，防篡改与越权分配 (Before-Insert Guard & Update Defense)
+func (mod *Model) sanitizeMutationPayload(
+	sec *SecurityContext,
+	writePlan ReducedMutationPlan,
 	spec ModelDataScopeSpec,
 	payload maps.MapStrAny,
 	isCreate bool,
 ) error {
-	sec, bindings := ResolveSecurityContext(ctx, global)
-	plan := ReduceRoleScopes(sec, bindings)
-	if plan.IsUnrestricted {
+	if writePlan.EffectiveWriteScope == ScopeTypeAll {
 		return nil
 	}
 
@@ -227,6 +427,26 @@ func (mod *Model) sanitizeWritePayload(
 		if spec.OrgField != "" && sec != nil && sec.OrgID > 0 {
 			payload[spec.OrgField] = sec.OrgID
 		}
+		if mod.Columns != nil {
+			if _, hasCampus := mod.Columns["campus_id"]; hasCampus && sec != nil && sec.ActiveCampusID > 0 {
+				payload["campus_id"] = sec.ActiveCampusID
+			}
+		}
+
+		// 个人级权限：强制覆写真实 DoctorID，杜绝伪造他人工号挂单
+		if writePlan.EffectiveWriteScope == ScopeTypeSelf {
+			if mod.Columns != nil {
+				if _, hasDoctorCol := mod.Columns["doctor_id"]; hasDoctorCol && sec != nil && sec.DoctorID > 0 {
+					payload["doctor_id"] = sec.DoctorID
+				}
+			}
+			if spec.UserField != "" && sec != nil && sec.UserID > 0 {
+				payload[spec.UserField] = sec.UserID
+			}
+			if spec.DeptField != "" && sec != nil && sec.ActiveDeptID > 0 {
+				payload[spec.DeptField] = sec.ActiveDeptID
+			}
+		}
 	} else {
 		// 更新时严禁篡改归属机构与租户
 		if spec.TenantField != "" {
@@ -235,28 +455,40 @@ func (mod *Model) sanitizeWritePayload(
 		if spec.OrgField != "" {
 			delete(payload, spec.OrgField)
 		}
+
+		// 个人级权限：严禁篡改 doctor_id 或 user_id
+		if writePlan.EffectiveWriteScope == ScopeTypeSelf {
+			if mod.Columns != nil {
+				if _, hasDoctorCol := mod.Columns["doctor_id"]; hasDoctorCol && sec != nil && sec.DoctorID > 0 {
+					payload["doctor_id"] = sec.DoctorID
+				}
+			}
+			if spec.UserField != "" && sec != nil && sec.UserID > 0 {
+				payload[spec.UserField] = sec.UserID
+			}
+		}
 	}
 
-	// 校验目标科室管辖权
-	if spec.DeptField != "" {
+	// 校验目标科室管辖权 (非从表且非全院写)
+	if spec.DeptField != "" && spec.TableRole != TableRoleSlave {
 		if rawDept, ok := payload[spec.DeptField]; ok && rawDept != nil {
 			deptID, ok := toInt64(rawDept)
-			if ok && deptID > 0 && !isDeptAllowed(deptID, plan, sec) {
-				return fmt.Errorf("security violation: target department [%d] not authorized", deptID)
+			if ok && deptID > 0 && !isWriteDeptAllowed(deptID, writePlan, sec) {
+				return fmt.Errorf("%w: target department [%d] not authorized", ErrDataScopeDeptMismatch, deptID)
 			}
 		}
 	}
 	return nil
 }
 
-func isDeptAllowed(deptID int64, plan ReducedScopePlan, sec *SecurityContext) bool {
-	if plan.IsUnrestricted || plan.EnforceOrg {
+func isWriteDeptAllowed(deptID int64, plan ReducedMutationPlan, sec *SecurityContext) bool {
+	if plan.EffectiveWriteScope.GreaterOrEqual(ScopeTypeOrg) || plan.EffectiveWriteScope == ScopeTypeAll {
 		return true
 	}
-	if sec != nil && deptID == sec.DeptID {
+	if sec != nil && (deptID == sec.DeptID || deptID == sec.ActiveDeptID) {
 		return true
 	}
-	for _, id := range plan.AllowedDeptIDs {
+	for _, id := range plan.AllowedWriteDeptIDs {
 		if id == deptID {
 			return true
 		}

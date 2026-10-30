@@ -12,23 +12,23 @@ import (
 // DataScopeRegistry 全局数据库动态数据权限规格注册表 (Key: TableName / ModelID -> Value: ModelDataScopeSpec)
 var DataScopeRegistry sync.Map
 
-// ReloadDataScopes 从 sys_datascopes_access 表全量拉取并原子刷新内存注册表
+// ReloadDataScopes 从 sys_datascope_access 表全量拉取并原子刷新内存注册表
 func ReloadDataScopes() error {
 	if capsule.Global == nil {
 		return nil
 	}
 
 	sch := capsule.Schema()
-	hasTable, err := sch.HasTable("sys_datascopes_access")
+	hasTable, err := sch.HasTable("sys_datascope_access")
 	if err != nil || !hasTable {
-		log.Warn("[DataScope] table sys_datascopes_access does not exist or schema check failed, skipping dynamic registry load")
+		log.Warn("[DataScope] table sys_datascope_access does not exist or schema check failed, skipping dynamic registry load")
 		return nil
 	}
 
 	rows, err := capsule.Query().
-		Table("sys_datascopes_access").
+		Table("sys_datascope_access").
 		WhereNull("deleted_at").
-		Select("table", "scope_type", "condition_value").
+		Select("table", "entity_role", "tenant_field", "org_field", "campus_field", "dept_field", "ward_field", "doctor_field", "status").
 		Get()
 	if err != nil {
 		return err
@@ -47,7 +47,50 @@ func ReloadDataScopes() error {
 		}
 		tableName = strings.TrimSpace(tableName)
 
-		spec := parseScopeSpecFromJSON(row["condition_value"])
+		spec := ModelDataScopeSpec{
+			Enabled:     true,
+			Mode:        "enforcing",
+			TenantField: "tenant_id",
+			OrgField:    "org_id",
+			CampusField: "campus_id",
+			DeptField:   "dept_id",
+			WardField:   "ward_id",
+			UserField:   "doctor_id",
+		}
+		if statusVal, ok := row["status"]; ok && statusVal != nil {
+			switch sv := statusVal.(type) {
+			case int, int64, int32, int8, uint, uint64, uint32, uint8:
+				spec.Enabled = sv != 0
+			case float64:
+				spec.Enabled = sv != 0
+			case string:
+				spec.Enabled = sv == "1" || strings.ToLower(sv) == "true"
+			}
+		}
+		if tf, ok := row["tenant_field"].(string); ok && strings.TrimSpace(tf) != "" {
+			spec.TenantField = strings.TrimSpace(tf)
+		}
+		if of, ok := row["org_field"].(string); ok && strings.TrimSpace(of) != "" {
+			spec.OrgField = strings.TrimSpace(of)
+		}
+		if cf, ok := row["campus_field"].(string); ok && strings.TrimSpace(cf) != "" {
+			spec.CampusField = strings.TrimSpace(cf)
+		}
+		if df, ok := row["dept_field"].(string); ok && strings.TrimSpace(df) != "" {
+			spec.DeptField = strings.TrimSpace(df)
+		}
+		if wf, ok := row["ward_field"].(string); ok && strings.TrimSpace(wf) != "" {
+			spec.WardField = strings.TrimSpace(wf)
+		}
+		if docF, ok := row["doctor_field"].(string); ok && strings.TrimSpace(docF) != "" {
+			spec.UserField = strings.TrimSpace(docF)
+		}
+		if er, ok := row["entity_role"].(string); ok && strings.TrimSpace(er) == "SLAVE" {
+			spec.TableRole = "DETAIL_SLAVE"
+		} else {
+			spec.TableRole = "MASTER_ENTITY"
+		}
+
 		newMap[tableName] = spec
 		// 同时记录小写映射以支持不区分大小写匹配
 		lowerName := strings.ToLower(tableName)
@@ -66,7 +109,7 @@ func ReloadDataScopes() error {
 		DataScopeRegistry.Store(k, v)
 	}
 
-	log.Info("[DataScope] successfully reloaded %d data scope specs from sys_datascopes_access", len(newMap))
+	log.Info("[DataScope] successfully reloaded %d data scope specs from sys_datascope_access", len(newMap))
 	return nil
 }
 

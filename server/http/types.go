@@ -3,6 +3,7 @@ package http
 import (
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -33,19 +34,19 @@ const (
 
 // Option the http server opiton
 type Option struct {
-	Port         int           `json:"port,omitempty"`
-	Host         string        `json:"host,omitempty"`
+	Port              int           `json:"port,omitempty"`
+	Host              string        `json:"host,omitempty"`
 	Timeout           time.Duration `json:"timeout,omitempty"`
 	DrainTimeout      time.Duration `json:"drain_timeout,omitempty"`       // 优雅关机排空超时时间，默认 15s
 	ReadHeaderTimeout time.Duration `json:"read_header_timeout,omitempty"` // 请求头读取超时，默认 5s
 	IdleTimeout       time.Duration `json:"idle_timeout,omitempty"`        // 空闲连接保持超时，默认 120s
 	Root              string        `json:"root,omitempty"`                // API Root
-	Allows       []string      `json:"allows,omitempty"`        // CORS Domains
+	Allows            []string      `json:"allows,omitempty"`              // CORS Domains
 }
 
 // Server the http server opiton
 type Server struct {
-	router    *gin.Engine
+	router    atomic.Pointer[gin.Engine]
 	addr      net.Addr
 	srv       *http.Server
 	signal    chan uint8

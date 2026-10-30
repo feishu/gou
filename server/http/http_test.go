@@ -161,3 +161,99 @@ func get(t *testing.T, server *Server, path string) (int, []byte) {
 	}
 	return resp.StatusCode, body
 }
+
+func TestSwapRouter(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+	router1 := gin.New()
+	router1.GET("/api/v1/ping", func(ctx *gin.Context) {
+		ctx.JSON(200, "v1")
+	})
+
+	server := New(router1, Option{Port: 0, Root: "/", Timeout: 200 * time.Millisecond})
+	var err error
+	go func() { err = server.Start() }()
+	defer server.Stop()
+
+	<-server.Event()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.True(t, server.Ready())
+
+	// Test router1 response
+	status, data := get(t, server, "/api/v1/ping")
+	assert.Equal(t, 200, status)
+	assert.Equal(t, []byte(`"v1"`), data)
+
+	// Router1 does not have /api/v1/new
+	status, _ = get(t, server, "/api/v1/new")
+	assert.Equal(t, 404, status)
+
+	// Create router2 and swap
+	router2 := gin.New()
+	router2.GET("/api/v1/ping", func(ctx *gin.Context) {
+		ctx.JSON(200, "v2")
+	})
+	router2.GET("/api/v1/new", func(ctx *gin.Context) {
+		ctx.JSON(200, "new")
+	})
+
+	server.SwapRouter(router2)
+
+	// Verify atomic swap: router2 routes are now active without socket reconnection
+	status, data = get(t, server, "/api/v1/ping")
+	assert.Equal(t, 200, status)
+	assert.Equal(t, []byte(`"v2"`), data)
+
+	status, data = get(t, server, "/api/v1/new")
+	assert.Equal(t, 200, status)
+	assert.Equal(t, []byte(`"new"`), data)
+}
+
+func TestSwapRouterConcurrent(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+	router1 := gin.New()
+	router1.GET("/api/ping", func(ctx *gin.Context) {
+		ctx.JSON(200, "ok")
+	})
+
+	server := New(router1, Option{Port: 0, Root: "/", Timeout: 200 * time.Millisecond})
+	var err error
+	go func() { err = server.Start() }()
+	defer server.Stop()
+
+	<-server.Event()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Concurrent requests while swapping routers
+	done := make(chan bool)
+	go func() {
+		for i := 0; i < 20; i++ {
+			r := gin.New()
+			version := fmt.Sprintf("ver-%d", i)
+			r.GET("/api/ping", func(ctx *gin.Context) {
+				ctx.JSON(200, version)
+			})
+			server.SwapRouter(r)
+			time.Sleep(5 * time.Millisecond)
+		}
+		done <- true
+	}()
+
+	// Clients making requests continuously
+	clientDone := make(chan bool)
+	go func() {
+		for i := 0; i < 50; i++ {
+			status, data := get(t, server, "/api/ping")
+			assert.Equal(t, 200, status)
+			assert.NotEmpty(t, data)
+			time.Sleep(2 * time.Millisecond)
+		}
+		clientDone <- true
+	}()
+
+	<-done
+	<-clientDone
+}
