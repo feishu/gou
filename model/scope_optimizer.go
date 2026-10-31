@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
+	jsoniter "github.com/json-iterator/go"
 	"github.com/yaoapp/kun/log"
 )
 
@@ -54,12 +56,15 @@ func (mod *Model) BeforeQueryDataScope(ctx context.Context, global map[string]in
 	// V3.3: 优先使用双轨角色元组 (RoleScopeTuple) 进行降阶，兼容回退至经典 bindings
 	var plan ReducedScopePlan
 	if global != nil {
-		if tuples, ok := global["role_scope_tuples"].([]RoleScopeTuple); ok && len(tuples) > 0 {
-			var intentCap ScopeType
-			if sec != nil && sec.IntentScopeCap > 0 {
-				intentCap = sec.IntentScopeCap
+		if rawTuples, ok := global["role_scope_tuples"]; ok {
+			tuples := parseRoleScopeTuples(rawTuples)
+			if len(tuples) > 0 {
+				var intentCap ScopeType
+				if sec != nil && sec.IntentScopeCap > 0 {
+					intentCap = sec.IntentScopeCap
+				}
+				plan, _ = ReduceRoleScopeTuples(sec, tuples, intentCap)
 			}
-			plan, _ = ReduceRoleScopeTuples(sec, tuples, intentCap)
 		}
 	}
 	if plan.EffectiveReadScope == 0 {
@@ -189,17 +194,25 @@ func BuildAndInjectQueryWhere(
 			}
 		}
 
-		if plan.IncludeSelf && spec.UserField != "" && sec != nil && sec.UserID > 0 {
-			if mod == nil || mod.Columns == nil || mod.Columns[spec.UserField] != nil {
-				m := "where"
-				if len(innerOrWheres) > 0 {
-					m = "orwhere"
+		if plan.IncludeSelf && spec.UserField != "" && sec != nil {
+			var userVal int64 = sec.UserID
+			if (spec.UserField == "doctor_id" || spec.UserField == "staff_id") && sec.DoctorID > 0 {
+				userVal = sec.DoctorID
+			} else if spec.UserField == "patient_id" && sec.PatientID > 0 {
+				userVal = sec.PatientID
+			}
+			if userVal > 0 {
+				if mod == nil || mod.Columns == nil || mod.Columns[spec.UserField] != nil {
+					m := "where"
+					if len(innerOrWheres) > 0 {
+						m = "orwhere"
+					}
+					innerOrWheres = append(innerOrWheres, QueryWhere{
+						Method: m,
+						Column: formatColumn(prefix, spec.UserField),
+						Value:  userVal,
+					})
 				}
-				innerOrWheres = append(innerOrWheres, QueryWhere{
-					Method: m,
-					Column: formatColumn(prefix, spec.UserField),
-					Value:  sec.UserID,
-				})
 			}
 		}
 
@@ -379,15 +392,27 @@ func ResolveSecurityContext(ctx context.Context, global map[string]interface{}) 
 	if global != nil {
 		if rawUID, ok := global["user_id"]; ok {
 			sec.UserID, _ = toInt64(rawUID)
+		} else if rawUID, ok := global["uid"]; ok {
+			sec.UserID, _ = toInt64(rawUID)
 		}
 		if rawTID, ok := global["tenant_id"]; ok {
+			sec.TenantID, _ = toInt64(rawTID)
+		} else if rawTID, ok := global["tid"]; ok {
 			sec.TenantID, _ = toInt64(rawTID)
 		}
 		if rawOID, ok := global["org_id"]; ok {
 			sec.OrgID, _ = toInt64(rawOID)
+		} else if rawOID, ok := global["oid"]; ok {
+			sec.OrgID, _ = toInt64(rawOID)
 		}
 		if rawDID, ok := global["dept_id"]; ok {
 			sec.DeptID, _ = toInt64(rawDID)
+		}
+		if rawDocID, ok := global["doctor_id"]; ok {
+			sec.DoctorID, _ = toInt64(rawDocID)
+		}
+		if rawPatID, ok := global["patient_id"]; ok {
+			sec.PatientID, _ = toInt64(rawPatID)
 		}
 		if prefix, ok := global["dept_path_prefix"].(string); ok {
 			sec.DeptPathPrefix = prefix
@@ -476,6 +501,15 @@ func toInt64(v interface{}) (int64, bool) {
 		return int64(val), true
 	case float32:
 		return int64(val), true
+	case string:
+		if s := strings.TrimSpace(val); s != "" {
+			if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+				return n, true
+			}
+			if f, err := strconv.ParseFloat(s, 64); err == nil {
+				return int64(f), true
+			}
+		}
 	}
 	return 0, false
 }
@@ -500,4 +534,80 @@ func toInt64Slice(v interface{}) []int64 {
 		return res
 	}
 	return nil
+}
+
+// parseRoleScopeTuples 解析通用角色读写二元组切片，兼容 []RoleScopeTuple 与 []interface{}(JSON map)
+func parseRoleScopeTuples(raw interface{}) []RoleScopeTuple {
+	if raw == nil {
+		return nil
+	}
+	if direct, ok := raw.([]RoleScopeTuple); ok {
+		return direct
+	}
+	if str, ok := raw.(string); ok && str != "" {
+		var unmarshaled []interface{}
+		if err := jsoniter.UnmarshalFromString(str, &unmarshaled); err == nil {
+			raw = unmarshaled
+		}
+	}
+	items, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+	var res []RoleScopeTuple
+	for _, it := range items {
+		if direct, ok := it.(RoleScopeTuple); ok {
+			res = append(res, direct)
+			continue
+		}
+		m, ok := it.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		var tuple RoleScopeTuple
+		if rID, ok := m["role_id"]; ok {
+			tuple.RoleID, _ = toInt64(rID)
+		}
+		if axis, ok := m["anchor_axis"].(string); ok && axis != "" {
+			tuple.AnchorAxis = AnchorAxis(axis)
+		} else {
+			tuple.AnchorAxis = AxisClinicalDept
+		}
+		if rScope, ok := m["read_scope"]; ok {
+			if s, ok := toInt64(rScope); ok {
+				tuple.ReadScope = ScopeType(s)
+			}
+		}
+		if pol, ok := m["mutation_policy"].(string); ok && pol != "" {
+			tuple.MutationPolicy = MutationPolicy(pol)
+		} else {
+			tuple.MutationPolicy = MutationStrictSelf
+		}
+		if cScope, ok := m["custom_mutation_scope"]; ok {
+			if s, ok := toInt64(cScope); ok {
+				tuple.CustomMutationScope = ScopeType(s)
+			}
+		}
+		if slots, ok := m["identity_slots"].([]interface{}); ok {
+			for _, sl := range slots {
+				if s, ok := sl.(string); ok && s != "" {
+					tuple.IdentitySlots = append(tuple.IdentitySlots, s)
+				}
+			}
+		}
+		if gT, ok := m["granted_tenant_ids"]; ok {
+			tuple.GrantedTenantIDs = toInt64Slice(gT)
+		}
+		if gC, ok := m["granted_campus_ids"]; ok {
+			tuple.GrantedCampusIDs = toInt64Slice(gC)
+		}
+		if gD, ok := m["granted_dept_ids"]; ok {
+			tuple.GrantedDeptIDs = toInt64Slice(gD)
+		}
+		if gW, ok := m["granted_ward_ids"]; ok {
+			tuple.GrantedWardIDs = toInt64Slice(gW)
+		}
+		res = append(res, tuple)
+	}
+	return res
 }

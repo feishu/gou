@@ -169,6 +169,7 @@ var (
 type SecurityContext struct {
 	UserID            int64     `json:"user_id"`
 	DoctorID          int64     `json:"doctor_id"`
+	PatientID         int64     `json:"patient_id"`
 	TenantID          int64     `json:"tenant_id"`
 	OrgID             int64     `json:"org_id"`
 	DeptID            int64     `json:"dept_id"`

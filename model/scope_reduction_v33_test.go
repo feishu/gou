@@ -138,3 +138,57 @@ func TestReduceRoleScopeTuples_SubsumptionLattice(t *testing.T) {
 	assert.Empty(t, readPlan.AllowedDeptIDs, "Org scope must subsume AllowedDeptIDs")
 }
 
+// TestParseRoleScopeTuples_MapAndJSON
+// 验证反序列化来自 Session Dump 或 TS/JS 运行时的 []interface{} 与 JSON string
+func TestParseRoleScopeTuples_MapAndJSON(t *testing.T) {
+	rawMaps := []interface{}{
+		map[string]interface{}{
+			"role_id":            int(101),
+			"anchor_axis":        "clinical_dept",
+			"read_scope":         int(4), // ScopeTypeCampus
+			"mutation_policy":    "strict_self",
+			"granted_campus_ids": []interface{}{int(1), int(2)},
+		},
+		map[string]interface{}{
+			"role_id":         "102",
+			"anchor_axis":     "nursing_ward",
+			"read_scope":      "2", // ScopeTypeUnit
+			"mutation_policy": "read_only",
+			"granted_ward_ids": []interface{}{"301", "302"},
+		},
+	}
+
+	tuples := parseRoleScopeTuples(rawMaps)
+	assert.Len(t, tuples, 2)
+	assert.Equal(t, int64(101), tuples[0].RoleID)
+	assert.Equal(t, ScopeTypeCampus, tuples[0].ReadScope)
+	assert.Equal(t, AxisClinicalDept, tuples[0].AnchorAxis)
+	assert.Equal(t, []int64{1, 2}, tuples[0].GrantedCampusIDs)
+
+	assert.Equal(t, int64(102), tuples[1].RoleID)
+	assert.Equal(t, ScopeTypeUnit, tuples[1].ReadScope)
+	assert.Equal(t, AxisNursingWard, tuples[1].AnchorAxis)
+	assert.Equal(t, MutationReadOnly, tuples[1].MutationPolicy)
+	assert.Equal(t, []int64{301, 302}, tuples[1].GrantedWardIDs)
+}
+
+// TestResolveSecurityContext_FallbackAliases
+// 验证 uid / oid / tid / doctor_id / patient_id 等会话别名的正确解析
+func TestResolveSecurityContext_FallbackAliases(t *testing.T) {
+	global := map[string]interface{}{
+		"uid":        "8001",
+		"oid":        "101",
+		"tid":        "1000000000",
+		"doctor_id":  "501",
+		"patient_id": "9001",
+	}
+
+	sec, _ := ResolveSecurityContext(nil, global)
+	assert.NotNil(t, sec)
+	assert.Equal(t, int64(8001), sec.UserID)
+	assert.Equal(t, int64(101), sec.OrgID)
+	assert.Equal(t, int64(1000000000), sec.TenantID)
+	assert.Equal(t, int64(501), sec.DoctorID)
+	assert.Equal(t, int64(9001), sec.PatientID)
+}
+

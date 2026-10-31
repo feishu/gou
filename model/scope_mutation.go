@@ -44,12 +44,15 @@ func (mod *Model) resolveMutationPlan(ctx context.Context, global map[string]int
 
 	var writePlan ReducedMutationPlan
 	if global != nil {
-		if tuples, ok := global["role_scope_tuples"].([]RoleScopeTuple); ok && len(tuples) > 0 {
-			var intentCap ScopeType
-			if sec != nil && sec.IntentScopeCap > 0 {
-				intentCap = sec.IntentScopeCap
+		if rawTuples, ok := global["role_scope_tuples"]; ok {
+			tuples := parseRoleScopeTuples(rawTuples)
+			if len(tuples) > 0 {
+				var intentCap ScopeType
+				if sec != nil && sec.IntentScopeCap > 0 {
+					intentCap = sec.IntentScopeCap
+				}
+				_, writePlan = ReduceRoleScopeTuples(sec, tuples, intentCap)
 			}
-			_, writePlan = ReduceRoleScopeTuples(sec, tuples, intentCap)
 		}
 	}
 
