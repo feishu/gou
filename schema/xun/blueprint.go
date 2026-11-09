@@ -27,17 +27,24 @@ func TableToBlueprint(table schema.Blueprint) types.Blueprint {
 	deletedAt, hasDeletedAt := columns["deleted_at"]
 	restoreData, hasRestoreData := columns["__restore_data"]
 
+	isTimeCol := func(col *schema.Column) bool {
+		if col == nil {
+			return false
+		}
+		t := strings.ToLower(col.Type)
+		return t == "timestamp" || t == "datetime"
+	}
+
 	if hasCreatedAt && hasUpdatedAt &&
-		createdAt.Type == "timestamp" &&
-		updatedAt.Type == "timestamp" {
+		isTimeCol(createdAt) &&
+		isTimeCol(updatedAt) {
 		blueprint.Option.Timestamps = true
 	}
 
 	if hasDeletedAt && hasRestoreData &&
-		deletedAt.Type == "timestamp" &&
+		isTimeCol(deletedAt) &&
 		(restoreData.Type == "text" || restoreData.Type == "json") {
 		blueprint.Option.SoftDeletes = true
-
 	}
 
 	// Indexes
@@ -115,7 +122,14 @@ func ColumnToBlueprint(col *schema.Column, prikeys []string) types.Column {
 	}
 
 	if col.Default != nil {
-		column.Default = col.Default
+		switch v := col.Default.(type) {
+		case *string:
+			if v != nil {
+				column.Default = *v
+			}
+		default:
+			column.Default = col.Default
+		}
 	}
 
 	if col.Length != nil {
@@ -170,31 +184,46 @@ func parseColumnType(col *schema.Column, column *types.Column) {
 			column.Nullable = false
 		}
 
-		switch column.Default.(type) {
+		switch v := column.Default.(type) {
 		case []byte:
-			column.Default = any.Of(string(column.Default.([]byte))).CInt()
+			column.Default = any.Of(string(v)).CInt()
 		case string:
-			column.Default = any.Of(column.Default.(string)).CInt()
+			column.Default = any.Of(v).CInt()
+		case *string:
+			if v != nil {
+				column.Default = any.Of(*v).CInt()
+			}
 		}
 		break
 
 	case "float", "decimal", "double":
 		column.Length = 0
-		switch column.Default.(type) {
+		switch v := column.Default.(type) {
 		case []byte:
-			column.Default = any.Of(string(column.Default.([]byte))).CFloat()
+			column.Default = any.Of(string(v)).CFloat()
 		case string:
-			column.Default = any.Of(column.Default.(string)).CFloat()
+			column.Default = any.Of(v).CFloat()
+		case *string:
+			if v != nil {
+				column.Default = any.Of(*v).CFloat()
+			}
 		}
 		break
 
 	case "boolean":
-		if v, ok := column.Default.(string); ok {
-			if v == "false" {
-				column.Default = false
-			} else if v == "true" {
-				column.Default = true
+		var boolStr string
+		switch v := column.Default.(type) {
+		case string:
+			boolStr = v
+		case *string:
+			if v != nil {
+				boolStr = *v
 			}
+		}
+		if boolStr == "false" || boolStr == "0" {
+			column.Default = false
+		} else if boolStr == "true" || boolStr == "1" {
+			column.Default = true
 		}
 		break
 
