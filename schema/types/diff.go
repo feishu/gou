@@ -1,7 +1,9 @@
 package types
 
 import (
+	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -184,7 +186,7 @@ func (diff *Diff) columnsAddAlt(columns []Column, blueprint map[string]Column) {
 			continue
 		}
 
-		if origin.Default != column.Default {
+		if !isDefaultEqual(origin.Default, column.Default) {
 			diff.Columns.Alt = append(diff.Columns.Alt, column)
 			continue
 		}
@@ -217,4 +219,32 @@ func (diff *Diff) columnsAddAlt(columns []Column, blueprint map[string]Column) {
 			continue
 		}
 	}
+}
+
+func isDefaultEqual(def1, def2 interface{}) bool {
+	if def1 == def2 {
+		return true
+	}
+	if def1 == nil || def2 == nil {
+		return false
+	}
+	s1 := strings.Trim(strings.TrimSpace(fmt.Sprintf("%v", def1)), "'")
+	s2 := strings.Trim(strings.TrimSpace(fmt.Sprintf("%v", def2)), "'")
+	if s1 == s2 {
+		return true
+	}
+	// 布尔类型等价比较 (false, "false", 0, "0")
+	if (s1 == "false" || s1 == "0") && (s2 == "false" || s2 == "0") {
+		return true
+	}
+	if (s1 == "true" || s1 == "1") && (s2 == "true" || s2 == "1") {
+		return true
+	}
+	// 数值类型兼容比较 (如 0, 0.0, "0.00", 0.00)
+	f1, err1 := strconv.ParseFloat(s1, 64)
+	f2, err2 := strconv.ParseFloat(s2, 64)
+	if err1 == nil && err2 == nil {
+		return f1 == f2
+	}
+	return false
 }

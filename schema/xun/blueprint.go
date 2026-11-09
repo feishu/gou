@@ -1,6 +1,7 @@
 package xun
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/yaoapp/gou/schema/types"
@@ -125,8 +126,12 @@ func ColumnToBlueprint(col *schema.Column, prikeys []string) types.Column {
 		switch v := col.Default.(type) {
 		case *string:
 			if v != nil {
-				column.Default = *v
+				column.Default = cleanDefaultString(*v)
 			}
+		case string:
+			column.Default = cleanDefaultString(v)
+		case []byte:
+			column.Default = cleanDefaultString(string(v))
 		default:
 			column.Default = col.Default
 		}
@@ -162,6 +167,16 @@ func ColumnToBlueprint(col *schema.Column, prikeys []string) types.Column {
 	return column
 }
 
+func cleanDefaultString(v string) string {
+	s := strings.TrimSpace(v)
+	s = strings.Trim(s, "\r\n\t ")
+	if strings.HasPrefix(s, "'") && strings.HasSuffix(s, "'") && len(s) >= 2 {
+		s = s[1 : len(s)-1]
+		s = strings.ReplaceAll(s, "''", "'")
+	}
+	return s
+}
+
 func parseColumnType(col *schema.Column, column *types.Column) {
 	column.Type = col.Type
 
@@ -169,11 +184,15 @@ func parseColumnType(col *schema.Column, column *types.Column) {
 
 	case "enum":
 		column.Option = col.Option
-		switch column.Default.(type) {
+		switch v := column.Default.(type) {
 		case []byte:
-			column.Default = strings.ReplaceAll(string(column.Default.([]byte)), "'", "")
+			column.Default = cleanDefaultString(string(v))
 		case string:
-			column.Default = strings.ReplaceAll(column.Default.(string), "'", "")
+			column.Default = cleanDefaultString(v)
+		case *string:
+			if v != nil {
+				column.Default = cleanDefaultString(*v)
+			}
 		}
 		break
 
@@ -186,12 +205,33 @@ func parseColumnType(col *schema.Column, column *types.Column) {
 
 		switch v := column.Default.(type) {
 		case []byte:
-			column.Default = any.Of(string(v)).CInt()
+			s := cleanDefaultString(string(v))
+			if s == "" || strings.EqualFold(s, "null") {
+				column.Default = nil
+			} else if n, err := strconv.Atoi(s); err == nil {
+				column.Default = n
+			} else {
+				column.Default = any.Of(s).CInt()
+			}
 		case string:
-			column.Default = any.Of(v).CInt()
+			s := cleanDefaultString(v)
+			if s == "" || strings.EqualFold(s, "null") {
+				column.Default = nil
+			} else if n, err := strconv.Atoi(s); err == nil {
+				column.Default = n
+			} else {
+				column.Default = any.Of(s).CInt()
+			}
 		case *string:
 			if v != nil {
-				column.Default = any.Of(*v).CInt()
+				s := cleanDefaultString(*v)
+				if s == "" || strings.EqualFold(s, "null") {
+					column.Default = nil
+				} else if n, err := strconv.Atoi(s); err == nil {
+					column.Default = n
+				} else {
+					column.Default = any.Of(s).CInt()
+				}
 			}
 		}
 		break
@@ -200,12 +240,33 @@ func parseColumnType(col *schema.Column, column *types.Column) {
 		column.Length = 0
 		switch v := column.Default.(type) {
 		case []byte:
-			column.Default = any.Of(string(v)).CFloat()
+			s := cleanDefaultString(string(v))
+			if s == "" || strings.EqualFold(s, "null") {
+				column.Default = nil
+			} else if f, err := strconv.ParseFloat(s, 64); err == nil {
+				column.Default = f
+			} else {
+				column.Default = any.Of(s).CFloat()
+			}
 		case string:
-			column.Default = any.Of(v).CFloat()
+			s := cleanDefaultString(v)
+			if s == "" || strings.EqualFold(s, "null") {
+				column.Default = nil
+			} else if f, err := strconv.ParseFloat(s, 64); err == nil {
+				column.Default = f
+			} else {
+				column.Default = any.Of(s).CFloat()
+			}
 		case *string:
 			if v != nil {
-				column.Default = any.Of(*v).CFloat()
+				s := cleanDefaultString(*v)
+				if s == "" || strings.EqualFold(s, "null") {
+					column.Default = nil
+				} else if f, err := strconv.ParseFloat(s, 64); err == nil {
+					column.Default = f
+				} else {
+					column.Default = any.Of(s).CFloat()
+				}
 			}
 		}
 		break
@@ -214,11 +275,13 @@ func parseColumnType(col *schema.Column, column *types.Column) {
 		var boolStr string
 		switch v := column.Default.(type) {
 		case string:
-			boolStr = v
+			boolStr = cleanDefaultString(v)
 		case *string:
 			if v != nil {
-				boolStr = *v
+				boolStr = cleanDefaultString(*v)
 			}
+		case []byte:
+			boolStr = cleanDefaultString(string(v))
 		}
 		if boolStr == "false" || boolStr == "0" {
 			column.Default = false
