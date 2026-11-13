@@ -395,6 +395,10 @@ func (runner *Runner) _exec() {
 
 	v, err := instance.Run(ctx)
 	if err != nil {
+		if e, ok := err.(*v8go.JSError); ok {
+			PrintException("<init>", nil, e, inv.script.SourceRoots)
+		}
+		log.Error("[runner] %s <init> %s", inv.script.ID, err.Error())
 		runner.chResp <- err
 		return
 	}
@@ -436,6 +440,7 @@ func (runner *Runner) _exec() {
 		if e, ok := err.(*v8go.JSError); ok {
 			PrintException(inv.method, inv.args, e, inv.script.SourceRoots)
 		}
+		log.Error("[runner] %s.%s %s", inv.script.ID, inv.method, err.Error())
 		runner.chResp <- err
 		return
 	}

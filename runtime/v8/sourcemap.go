@@ -88,18 +88,21 @@ func clearSourceMaps() {
 
 // PrintException print the exception
 func PrintException(method string, args []interface{}, jserr *v8go.JSError, rootMapping interface{}) {
+	ex := exception.New(jserr.Message, 500)
+	stack := StackTrace(jserr, rootMapping)
+	raw, _ := jsoniter.MarshalToString(args)
 
 	if runtimeOption.Debug {
-		ex := exception.New(jserr.Message, 500)
 		color.Red("\n----------------------------------")
 		color.Red("Script Exception: %s", fmt.Sprintf("%d %s", ex.Code, ex.Message))
 		color.Red("----------------------------------")
 
-		color.Red("%s\n", StackTrace(jserr, rootMapping))
+		color.Red("%s\n", stack)
 		fmt.Println(color.YellowString("\nMethod:"), color.WhiteString("%s", method))
 		color.Yellow("Args:")
-		raw, _ := jsoniter.MarshalToString(args)
 		color.White("%s\n", raw)
+	} else {
+		log.Error("[V8 Script Exception] %d %s | Method: %s | Args: %s\n%s", ex.Code, ex.Message, method, raw, stack)
 	}
 }
 
