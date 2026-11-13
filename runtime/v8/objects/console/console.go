@@ -24,19 +24,25 @@ const (
 
 // Object Javascript API
 type Object struct {
-	mode string // production, development
+	mode  string // production, development
+	debug bool   // whether global debug is enabled
 }
 
 // New create a new Console Object
 func New(mode string) *Object {
-	// validate mode
 	if mode == "" || mode != "development" {
 		mode = "production"
 	}
 
 	return &Object{
-		mode: mode, // production, development
+		mode: mode,
 	}
+}
+
+// WithDebug sets whether debug mode is enabled globally
+func (obj *Object) WithDebug(debug bool) *Object {
+	obj.debug = debug
+	return obj
 }
 
 // ExportObject Export as a Console Object
@@ -63,17 +69,13 @@ func (obj *Object) Set(name string, ctx *v8go.Context) error {
 		return err
 	}
 
-	err = ctx.Global().Set(name, instance)
-	if err != nil {
-		return err
-	}
-	return nil
+	return ctx.Global().Set(name, instance)
 }
 
-// ShouldLog checks if console.log should output in the given context
+// ShouldLog checks if console.log or console.info should output in the given context
 func (obj *Object) ShouldLog(ctx *v8go.Context) bool {
-	// 1. In development mode, always output
-	if obj.mode == "development" {
+	// 1. In development mode or global debug enabled, always output
+	if obj.mode == "development" || obj.debug {
 		return true
 	}
 
@@ -98,7 +100,6 @@ func isEnvConsoleEnabled() bool {
 	keys := []string{
 		"YAO_V8_CONSOLE_LOG",
 		"YAO_CONSOLE_LOG",
-		"YAO_V8_CONSOLE",
 	}
 	for _, key := range keys {
 		val := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
@@ -113,34 +114,17 @@ func isContextDebugEnabled(ctx context.Context) bool {
 	if ctx == nil {
 		return false
 	}
-	keys := []interface{}{
-		DebugContextKey,
-		"debug",
-		"Debug",
-		"DEBUG",
-		"x-yao-debug",
-		"X-Yao-Debug",
-		"x-debug",
-		"X-Debug",
-	}
-	for _, k := range keys {
-		v := ctx.Value(k)
-		if v == nil {
-			continue
-		}
-		switch val := v.(type) {
-		case bool:
-			if val {
-				return true
-			}
-		case int:
-			if val > 0 {
-				return true
-			}
-		case string:
-			lower := strings.ToLower(strings.TrimSpace(val))
-			if lower == "true" || lower == "1" || lower == "yes" || lower == "on" {
-				return true
+	for _, k := range []interface{}{DebugContextKey, "debug", "x-yao-debug"} {
+		if v := ctx.Value(k); v != nil {
+			switch val := v.(type) {
+			case bool:
+				if val {
+					return true
+				}
+			case string:
+				if strings.EqualFold(val, "true") || val == "1" {
+					return true
+				}
 			}
 		}
 	}
@@ -152,7 +136,7 @@ func getTracePrefix(ctx *v8go.Context) string {
 		return "[V8 Console]"
 	}
 	if goctx := bridge.GoContext(ctx); goctx != nil {
-		for _, key := range []interface{}{TraceContextKey, "trace_id", "traceId", "request_id", "trace"} {
+		for _, key := range []interface{}{TraceContextKey, "trace_id", "traceId", "request_id"} {
 			if v := goctx.Value(key); v != nil {
 				if str, ok := v.(string); ok && str != "" {
 					return fmt.Sprintf("[V8 Console] [%s]", str)
@@ -175,40 +159,7 @@ func (obj *Object) log(iso *v8go.Isolate) *v8go.FunctionTemplate {
 			info.Release()
 			return v8go.Null(iso)
 		}
-		if obj.mode == "development" {
-			return obj.dump(info, helper.Dump)
-		}
-		return obj.dumpToLogger(info, log.DebugLevel)
-	})
-}
-
-/**
- * Warn
- *
- * @param args
- * @return *v8go.Value
- */
-func (obj *Object) warn(iso *v8go.Isolate) *v8go.FunctionTemplate {
-	return v8go.NewFunctionTemplate(iso, func(info *v8go.FunctionCallbackInfo) *v8go.Value {
-		if obj.mode == "development" {
-			return obj.dump(info, helper.DumpWarn)
-		}
-		return obj.dumpToLogger(info, log.WarnLevel)
-	})
-}
-
-/**
- * Error
- *
- * @param args
- * @return *v8go.Value
- */
-func (obj *Object) error(iso *v8go.Isolate) *v8go.FunctionTemplate {
-	return v8go.NewFunctionTemplate(iso, func(info *v8go.FunctionCallbackInfo) *v8go.Value {
-		if obj.mode == "development" {
-			return obj.dump(info, helper.DumpError)
-		}
-		return obj.dumpToLogger(info, log.ErrorLevel)
+		return obj.handle(info, helper.Dump, log.Debug)
 	})
 }
 
@@ -220,45 +171,42 @@ func (obj *Object) error(iso *v8go.Isolate) *v8go.FunctionTemplate {
  */
 func (obj *Object) info(iso *v8go.Isolate) *v8go.FunctionTemplate {
 	return v8go.NewFunctionTemplate(iso, func(info *v8go.FunctionCallbackInfo) *v8go.Value {
-		if obj.mode == "development" {
-			return obj.dump(info, helper.DumpInfo)
+		if !obj.ShouldLog(info.Context()) {
+			info.Release()
+			return v8go.Null(iso)
 		}
-		return obj.dumpToLogger(info, log.InfoLevel)
+		return obj.handle(info, helper.DumpInfo, log.Info)
 	})
 }
 
 /**
- * Dump (for development mode colorful output)
+ * Warn
  *
  * @param args
  * @return *v8go.Value
  */
-func (obj *Object) dump(info *v8go.FunctionCallbackInfo, method func(...interface{})) *v8go.Value {
-	defer info.Release()
-	args := info.Args()
-	if len(args) < 1 {
-		msg := "console: Missing parameters"
-		log.Error("%s", msg)
-		return bridge.JsException(info.Context(), msg)
-	}
-
-	goArgs, err := bridge.GoValues(args, info.Context())
-	if err != nil {
-		msg := fmt.Sprintf("console: %s", err.Error())
-		log.Error("%s", msg)
-		return bridge.JsException(info.Context(), msg)
-	}
-	method(goArgs...)
-	return v8go.Null(info.Context().Isolate())
+func (obj *Object) warn(iso *v8go.Isolate) *v8go.FunctionTemplate {
+	return v8go.NewFunctionTemplate(iso, func(info *v8go.FunctionCallbackInfo) *v8go.Value {
+		return obj.handle(info, helper.DumpWarn, log.Warn)
+	})
 }
 
 /**
- * DumpToLogger (for production mode structured kun/log output)
+ * Error
  *
  * @param args
  * @return *v8go.Value
  */
-func (obj *Object) dumpToLogger(info *v8go.FunctionCallbackInfo, level log.Level) *v8go.Value {
+func (obj *Object) error(iso *v8go.Isolate) *v8go.FunctionTemplate {
+	return v8go.NewFunctionTemplate(iso, func(info *v8go.FunctionCallbackInfo) *v8go.Value {
+		return obj.handle(info, helper.DumpError, log.Error)
+	})
+}
+
+/**
+ * handle processes callback args and dispatches to development or production logger
+ */
+func (obj *Object) handle(info *v8go.FunctionCallbackInfo, devMethod func(...interface{}), prodLogger func(string, ...interface{})) *v8go.Value {
 	defer info.Release()
 	args := info.Args()
 	if len(args) < 1 {
@@ -274,22 +222,12 @@ func (obj *Object) dumpToLogger(info *v8go.FunctionCallbackInfo, level log.Level
 		return bridge.JsException(info.Context(), msg)
 	}
 
-	prefix := getTracePrefix(info.Context())
-	output := helper.ToString(goArgs...)
-
-	switch level {
-	case log.TraceLevel:
-		log.Trace("%s %s", prefix, output)
-	case log.DebugLevel:
-		log.Debug("%s %s", prefix, output)
-	case log.InfoLevel:
-		log.Info("%s %s", prefix, output)
-	case log.WarnLevel:
-		log.Warn("%s %s", prefix, output)
-	case log.ErrorLevel:
-		log.Error("%s %s", prefix, output)
-	default:
-		log.Debug("%s %s", prefix, output)
+	if obj.mode == "development" {
+		devMethod(goArgs...)
+	} else {
+		prefix := getTracePrefix(info.Context())
+		output := helper.ToString(goArgs...)
+		prodLogger("%s %s", prefix, output)
 	}
 
 	return v8go.Null(info.Context().Isolate())

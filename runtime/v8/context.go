@@ -36,7 +36,7 @@ func (context *Context) Call(method string, args ...interface{}) (interface{}, e
 	}
 
 	// console.log("foo", "bar", 1, 2, 3, 4)
-	err = console.New(runtimeOption.ConsoleMode).Set("console", context.Context)
+	err = console.New(runtimeOption.ConsoleMode).WithDebug(runtimeOption.Debug).Set("console", context.Context)
 	if err != nil {
 		return nil, err
 	}
@@ -52,8 +52,9 @@ func (context *Context) Call(method string, args ...interface{}) (interface{}, e
 	if err != nil {
 		if e, ok := err.(*v8go.JSError); ok {
 			PrintException(method, args, e, context.SourceRoots)
+		} else {
+			log.Error("%s.%s %s", context.ID, method, err.Error())
 		}
-		log.Error("%s.%s %s", context.ID, method, err.Error())
 		return nil, err
 	}
 	defer jsRes.Release()
@@ -169,7 +170,7 @@ func (context *Context) CallWith(ctx context.Context, method string, args ...int
 	}
 
 	// console.log("foo", "bar", 1, 2, 3, 4)
-	err = console.New(runtimeOption.ConsoleMode).Set("console", context.Context)
+	err = console.New(runtimeOption.ConsoleMode).WithDebug(runtimeOption.Debug).Set("console", context.Context)
 	if err != nil {
 		return nil, err
 	}

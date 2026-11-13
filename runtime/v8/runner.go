@@ -397,8 +397,9 @@ func (runner *Runner) _exec() {
 	if err != nil {
 		if e, ok := err.(*v8go.JSError); ok {
 			PrintException("<init>", nil, e, inv.script.SourceRoots)
+		} else {
+			log.Error("[runner] %s <init> %s", inv.script.ID, err.Error())
 		}
-		log.Error("[runner] %s <init> %s", inv.script.ID, err.Error())
 		runner.chResp <- err
 		return
 	}
@@ -409,7 +410,7 @@ func (runner *Runner) _exec() {
 
 	// Ensure console is set on context if not provided by template
 	if global != nil && !global.Has("console") {
-		err = console.New(runtimeOption.ConsoleMode).Set("console", ctx)
+		err = console.New(runtimeOption.ConsoleMode).WithDebug(runtimeOption.Debug).Set("console", ctx)
 		if err != nil {
 			runner.chResp <- err
 			return
@@ -439,8 +440,9 @@ func (runner *Runner) _exec() {
 	if err != nil {
 		if e, ok := err.(*v8go.JSError); ok {
 			PrintException(inv.method, inv.args, e, inv.script.SourceRoots)
+		} else {
+			log.Error("[runner] %s.%s %s", inv.script.ID, inv.method, err.Error())
 		}
-		log.Error("[runner] %s.%s %s", inv.script.ID, inv.method, err.Error())
 		runner.chResp <- err
 		return
 	}

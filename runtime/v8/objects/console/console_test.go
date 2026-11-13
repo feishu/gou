@@ -66,20 +66,27 @@ func TestConsoleInProductionMode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Run("console.log should not output in production", func(t *testing.T) {
-		// Cannot capture output, but console.log should not cause errors in production mode
+	t.Run("console.log and console.info should not output in production by default", func(t *testing.T) {
+		// Cannot capture output, but console.log and console.info should not cause errors in production mode
 		_, err := ctx.RunScript(`console.log("hello world")`, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = ctx.RunScript(`console.info("info in production should be silent")`, "")
 		if err != nil {
 			t.Fatal(err)
 		}
 	})
 
-	t.Run("console.info, warn, error should still output in production", func(t *testing.T) {
-		_, err := ctx.RunScript(`console.info("info in production")`, "")
+	t.Run("console.warn, error should still output in production", func(t *testing.T) {
+		_, err := ctx.RunScript(`console.warn("warn in production")`, "")
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Only verify that no error occurs
+		_, err = ctx.RunScript(`console.error("error in production")`, "")
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -258,4 +265,31 @@ func TestConsoleRetainedValuesZeroLeakInProduction(t *testing.T) {
 			initialCount, afterCount, afterCount-initialCount)
 	}
 }
+
+func TestConsoleProductionWithGlobalDebug(t *testing.T) {
+	iso := v8go.NewIsolate()
+	defer iso.Dispose()
+
+	obj := New("production").WithDebug(true)
+	ctx := v8go.NewContext(iso)
+	defer ctx.Close()
+	err := obj.Set("console", ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !obj.ShouldLog(ctx) {
+		t.Fatal("Expected ShouldLog to be true when WithDebug(true)")
+	}
+
+	_, err = ctx.RunScript(`console.log("global debug enabled log", 999)`, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ctx.RunScript(`console.info("global debug enabled info", 888)`, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 

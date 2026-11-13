@@ -75,7 +75,7 @@ func MakeTemplate(iso *v8go.Isolate) *v8go.ObjectTemplate {
 	template.Set("log", logT.New().ExportObject(iso))
 	template.Set("time", timeT.New().ExportObject(iso))
 	template.Set("http", httpT.New(runtimeOption.DataRoot).ExportObject(iso))
-	template.Set("console", consoleT.New(runtimeOption.ConsoleMode).ExportObject(iso))
+	template.Set("console", consoleT.New(runtimeOption.ConsoleMode).WithDebug(runtimeOption.Debug).ExportObject(iso))
 
 	// set functions
 	template.Set("Exception", exceptionT.New().ExportFunction(iso))
